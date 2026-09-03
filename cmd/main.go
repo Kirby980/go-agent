@@ -7,9 +7,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"test/agent/internal/llm"
-	"test/agent/internal/prompt"
-	"test/agent/internal/router"
+
+	"github.com/Kirby980/agent/llm"
+	"github.com/Kirby980/agent/prompt"
+	"github.com/Kirby980/agent/router"
 )
 
 func main() {
