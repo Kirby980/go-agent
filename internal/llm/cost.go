@@ -1,4 +1,4 @@
-package cost
+package llm
 
 import "sync"
 

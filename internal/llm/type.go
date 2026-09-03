@@ -6,6 +6,20 @@ import (
 	"fmt"
 )
 
+// ToolDef 是给模型看的工具定义。
+type ToolDef struct {
+	Name        string
+	Description string
+	Parameters  json.RawMessage
+}
+
+// ToolCall 是模型返回的"我要调用这个工具"的结构化意图。
+type ToolCall struct {
+	ID   string          `json:"id"`   // 厂商给的调用 ID，回传结果时要带上
+	Name string          `json:"name"` // 工具名
+	Args json.RawMessage `json:"args"` // 统一后的工具参数 JSON
+}
+
 // APIError 是各家 Provider 非 2xx 响应的统一形态。
 // 各家错误体结构不同，但状态码 + 类型 + 文案这三样都有，够调用方判断该重试还是该改请求。
 type APIError struct {
@@ -40,8 +54,11 @@ const (
 )
 
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role       Role       `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息：模型发起的调用
+	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 消息：这条结果对应哪个调用
+
 }
 
 type ChatRequest struct {
@@ -50,12 +67,15 @@ type ChatRequest struct {
 	Temperature *float64  `json:"temperature,omitempty"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
+	Stop        []string  `json:"stop,omitempty"` // 命中任一序列时模型停止生成
+	Tools       []ToolDef
 }
 
 type ChatResponse struct {
 	Content      string
 	InputTokens  int
 	OutputTokens int
+	ToolCalls    []ToolCall
 }
 
 type StreamChunk struct {
