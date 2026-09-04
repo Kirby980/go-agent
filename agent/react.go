@@ -79,6 +79,7 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, emit func(AgentE
 			return
 		}
 		observation := agent.callTool(ctx, step.Action, rawArgs)
+		fmt.Println(step.Action, rawArgs)
 		emit(AgentEvent{Type: EventToolResult, Tool: step.Action, Text: observation, Step: state.Step})
 
 		// 把这一轮（模型的思考 + 工具的观察）追加进历史，回到下一轮 Thinking
@@ -192,4 +193,3 @@ func parseReact(text string) (reactStep, error) {
 	}
 	return step, nil
 }
-

@@ -70,6 +70,13 @@ func WithStore(store Store, sessionID string) Option {
 	}
 }
 
+// WithMemory 设置Memory配置
+func WithMemory(memory *State) Option {
+	return func(a *Agent) {
+		a.memory = memory
+	}
+}
+
 // actionSignature 生成动作唯一标识（工具名 + 参数文本），用于死循环与重复动作检测。
 func actionSignature(name string, args []byte) string {
 	return name + ":" + strings.TrimSpace(string(args))
@@ -127,8 +134,8 @@ func (agent *Agent) RunStream(ctx context.Context, goal string) <-chan AgentEven
 // 1. 初始化并校验依赖（Provider、Tool Registry）
 // 2. 加载历史状态或初始化新状态（initialState）
 // 3. 根据底层 Provider 是否支持原生 Function Calling 决定分流：
-//    - 支持 Tools: 进入 runFunctionCalling 原生工具调用循环
-//    - 不支持: 降级进入 runReAct（Thought-Action-Observation 文本自愈循环）
+//   - 支持 Tools: 进入 runFunctionCalling 原生工具调用循环
+//   - 不支持: 降级进入 runReAct（Thought-Action-Observation 文本自愈循环）
 func (agent *Agent) run(ctx context.Context, goal string, out chan<- AgentEvent) {
 	emit := func(event AgentEvent) bool {
 		select {
@@ -220,9 +227,9 @@ func (agent *Agent) initialState(ctx context.Context, goal string) (*State, erro
 }
 
 // buildSystemPrompt 根据当前能力生成系统提示词：
-// - 原生支持 Tools 时，使用通用的 systemPrompt（工具定义通过 API 请求入参传递）
-// - 非原生 Tools 时（ReAct 模式），将 Registry 中注册的所有工具详情（名称、描述、参数 JSON Schema）
-//   格式化填入 ReAct 格式模板中，告知模型可调用哪些工具及严格的 Thought/Action 交互协议。
+//   - 原生支持 Tools 时，使用通用的 systemPrompt（工具定义通过 API 请求入参传递）
+//   - 非原生 Tools 时（ReAct 模式），将 Registry 中注册的所有工具详情（名称、描述、参数 JSON Schema）
+//     格式化填入 ReAct 格式模板中，告知模型可调用哪些工具及严格的 Thought/Action 交互协议。
 func (agent *Agent) buildSystemPrompt() string {
 	if agent.provider != nil && agent.provider.Capabilities().Tools {
 		return agent.systemPrompt
