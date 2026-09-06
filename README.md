@@ -19,7 +19,10 @@
   - 同层任务并发调用，层间依赖同步等待；支持单点故障快速熔断取消（`context.WithCancel`）。
 - **统一模型抽象与智能路由 (LLM & Router)**：
   - 统一的 `Provider` 接口，内置 OpenAI、Claude、DeepSeek、豆包等模型适配器。
-  - 支持多 Provider 优先级路由（`Priority`）与故障自动降级容灾。
+  - 支持多 Provider 优先级路由（`Priority`）与公平轮询（`RoundRobin`）负载均衡，具备自动故障降级容灾能力。
+  - 提供 `AsProvider` 适配器，多模型路由器可作为单一 Provider 直接无缝注入 Agent。
+- **跨平台环境凭据自动识别 (Detector)**：
+  - 基于 `runtime.GOOS` 跨系统（macOS / Windows / Linux）自动识别环境变量与本地客户端配置（如 Claude Desktop、本地离线模型 Ollama 等），零配置开箱即用。
 - **工业级传输层 (Transport)**：
   - 具备令牌桶限流 (`Limiter`)。
   - 支持带抖动的指数退避重试 (`Exponential Backoff with Jitter`)，优先尊重服务端的 `Retry-After` 响应头。
@@ -83,10 +86,12 @@
 ├── llm/                         # [公开] 统一大模型抽象层
 │   ├── llm.go                   # Provider 契约、Message 与 Capability 定义
 │   ├── cost.go                  # Token 费用统计
+│   ├── detector/                # 跨平台本地环境凭据自动探测 (macOS/Windows/Linux)
+│   │   └── detector.go          # 环境变量、本地客户端配置、离线模型自动扫描
 │   ├── claude/                  # Anthropic Claude 适配实现
 │   │   ├── claude.go            # Claude Messages API 适配核心
 │   │   └── presets.go           # 预置官方构造函数
-│   └── openai/                  # OpenAI 兼容协议适配 (DeepSeek / Doubao 等)
+│   └── openai/                  # OpenAI 兼容协议适配 (DeepSeek / 豆包 等)
 │       ├── openai.go            # OpenAI 协议适配核心
 │       └── presets.go           # 预置 DeepSeek / 豆包 / 千问等构造函数
 ├── plan/                        # [公开] DAG 任务规划执行器
@@ -96,11 +101,11 @@
 ├── prompt/                      # [公开] 动态提示词模板
 │   └── prompt.go                # 基于 text/template 的动态提示词渲染
 ├── router/                      # [公开] 模型路由与多活降级
-│   ├── router.go                # 路由器核心实现
-│   └── strategy.go              # 路由策略契约 (Priority 等)
+│   ├── router.go                # 路由器核心实现与 AsProvider 适配器
+│   └── strategy.go              # 路由策略契约 (Priority、RoundRobin 轮询等)
 ├── cmd/                         # [示例] 命令行示例运行入口
-│   ├── config.go                # 配置加载与 Provider 构建
-│   └── main.go                  # 示例入口
+│   ├── config.go                # 跨平台凭据融合与 Provider 构建
+│   └── main.go                  # 轮询集群驱动的 Agent 示例入口
 ├── internal/                    # [私有] 内部实现细节 (外部项目无法 import)
 │   └── transport/               # 基础设施网络层
 │       ├── client.go            # HTTP 客户端核心 (执行退避重试与限流)
@@ -211,6 +216,58 @@ func main() {
 		panic(err)
 	}
 	fmt.Printf("执行结果: %+v\n", results)
+}
+```
+
+### 4. 跨平台凭据自动探测与多模型轮询容灾集群
+
+系统支持自动识别 macOS、Windows、Linux 下的环境变量、客户端配置（如 Claude Desktop）及本地免鉴权离线模型（如 Ollama）：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/Kirby980/agent/agent"
+	"github.com/Kirby980/agent/llm"
+	"github.com/Kirby980/agent/llm/claude"
+	"github.com/Kirby980/agent/llm/detector"
+	"github.com/Kirby980/agent/llm/openai"
+	"github.com/Kirby980/agent/router"
+	"github.com/Kirby980/agent/tool"
+)
+
+func main() {
+	// 1. 跨平台自动扫描本地环境的 API Key 和 BaseURL
+	creds := detector.DetectLocalCredentials()
+	var providers []llm.Provider
+	for _, c := range creds {
+		switch c.Supplier {
+		case "openai":
+			providers = append(providers, openai.NewOpenAICustom(c.Name, c.APIKey, c.BaseURL))
+		case "claude":
+			providers = append(providers, claude.NewClaudeCustom(c.Name, c.APIKey, c.BaseURL))
+		}
+	}
+
+	// 2. 创建基于 RoundRobin 轮询且支持故障降级的模型路由器
+	r, err := router.New(router.NewRoundRobin(), providers...)
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. 将路由器适配为单 Provider 注入 Agent，请求将在节点间均匀轮询，节点故障时自动转移
+	clusterProvider := r.AsProvider("multi-provider-cluster")
+	ag := agent.New(
+		clusterProvider,
+		"grok-4.6",
+		tool.NewRegistry(&tool.Calculator{}, &tool.Now{}),
+	)
+
+	fmt.Printf("成功启动 Agent，已接入 %d 个可用 Provider 节点\n", len(providers))
+	_ = ag
 }
 ```
 

@@ -65,3 +65,52 @@ func (r *Router) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan ll
 	}
 	return nil, "", fmt.Errorf("所有 Provider 均失败: %w", lastErr)
 }
+
+// AsProvider 将 Router 封装为一个满足 llm.Provider 接口的适配器实例，
+// 允许直接作为单一 Provider 注入到 Agent 中，透明获得负载均衡与故障转移容灾能力。
+func (r *Router) AsProvider(name string) llm.Provider {
+	if name == "" {
+		name = "router-cluster"
+	}
+	return &providerAdapter{
+		router: r,
+		name:   name,
+	}
+}
+
+type providerAdapter struct {
+	router *Router
+	name   string
+}
+
+func (a *providerAdapter) Name() string {
+	return a.name
+}
+
+func (a *providerAdapter) Capabilities() llm.Capability {
+	var caps llm.Capability
+	for _, p := range a.router.providers {
+		c := p.Capabilities()
+		if c.Streaming {
+			caps.Streaming = true
+		}
+		if c.Tools {
+			caps.Tools = true
+		}
+		if c.Thinking {
+			caps.Thinking = true
+		}
+	}
+	return caps
+}
+
+func (a *providerAdapter) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+	resp, _, err := a.router.Chat(ctx, req)
+	return resp, err
+}
+
+func (a *providerAdapter) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	stream, _, err := a.router.ChatStream(ctx, req)
+	return stream, err
+}
+

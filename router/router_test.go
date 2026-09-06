@@ -67,3 +67,50 @@ func TestRouter_AllFailed(t *testing.T) {
 		t.Fatalf("expected error when all providers fail")
 	}
 }
+
+func TestRouter_RoundRobin(t *testing.T) {
+	p1 := &mockProvider{name: "p1", resp: "resp1"}
+	p2 := &mockProvider{name: "p2", resp: "resp2"}
+
+	r, err := New(NewRoundRobin(), p1, p2)
+	if err != nil {
+		t.Fatalf("init error: %v", err)
+	}
+
+	// 第 1 次调用期望命中 p1
+	resp1, name1, err := r.Chat(context.Background(), llm.ChatRequest{})
+	if err != nil || name1 != "p1" || resp1.Content != "resp1" {
+		t.Fatalf("call 1 failed: name=%s, err=%v", name1, err)
+	}
+
+	// 第 2 次调用期望轮询命中 p2
+	resp2, name2, err := r.Chat(context.Background(), llm.ChatRequest{})
+	if err != nil || name2 != "p2" || resp2.Content != "resp2" {
+		t.Fatalf("call 2 failed: name=%s, err=%v", name2, err)
+	}
+
+	// 第 3 次调用期望重新轮询回 p1
+	resp3, name3, err := r.Chat(context.Background(), llm.ChatRequest{})
+	if err != nil || name3 != "p1" || resp3.Content != "resp1" {
+		t.Fatalf("call 3 failed: name=%s, err=%v", name3, err)
+	}
+}
+
+func TestRouter_AsProvider(t *testing.T) {
+	p1 := &mockProvider{name: "p1", resp: "from p1"}
+	r, err := New(Priority{}, p1)
+	if err != nil {
+		t.Fatalf("init error: %v", err)
+	}
+
+	provider := r.AsProvider("test-cluster")
+	if provider.Name() != "test-cluster" {
+		t.Errorf("expected name test-cluster, got %s", provider.Name())
+	}
+
+	resp, err := provider.Chat(context.Background(), llm.ChatRequest{})
+	if err != nil || resp.Content != "from p1" {
+		t.Fatalf("AsProvider.Chat failed: resp=%v, err=%v", resp, err)
+	}
+}
+

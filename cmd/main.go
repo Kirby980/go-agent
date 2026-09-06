@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Kirby980/agent/agent"
+	"github.com/Kirby980/agent/router"
 	"github.com/Kirby980/agent/tool"
 )
 
@@ -44,8 +45,27 @@ func main() {
 
 // runOnce: 构造请求 → transport.NewClient().Do(req) → 解析 choices[0].message.content 与 usage → 打印。
 func runOnce(ctx context.Context, cfg Config) error {
-	p := BuildAll(cfg)
-	a := agent.New(p["自定义"], "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}))
+	providers := BuildProviders(cfg)
+	if len(providers) == 0 {
+		return fmt.Errorf("未找到任何可用 Provider，请检查环境变量或配置")
+	}
+
+	fmt.Println("=== 当前已加载并接入轮询/容灾的 Provider 节点 ===")
+	for i, p := range providers {
+		fmt.Printf(" [%d] %s\n", i+1, p.Name())
+	}
+	fmt.Println("================================================")
+
+	// 使用 RoundRobin 轮询调度，并在某节点失败时自动尝试下一个节点（容灾降级）
+	r, err := router.New(router.NewRoundRobin(), providers...)
+	if err != nil {
+		return fmt.Errorf("初始化模型路由器失败: %w", err)
+	}
+
+	// 包装为单个 llm.Provider 注入 Agent
+	clusterProvider := r.AsProvider("multi-provider-cluster")
+	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}))
+
 
 	var name string
 	inputCh := make(chan string)
