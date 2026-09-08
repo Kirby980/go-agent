@@ -64,8 +64,8 @@ func runOnce(ctx context.Context, cfg Config) error {
 
 	// 包装为单个 llm.Provider 注入 Agent
 	clusterProvider := r.AsProvider("multi-provider-cluster")
-	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}))
 
+	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}), agent.WithStore(agent.NewFileStore("./store"), "test"))
 
 	var name string
 	inputCh := make(chan string)

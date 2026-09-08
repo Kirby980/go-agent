@@ -1,0 +1,69 @@
+{
+  "goal": "现在几点了？",
+  "messages": [
+    {
+      "role": "system",
+      "content": "你是一个会使用工具完成任务的助手。\n\n你可以使用以下工具：\n- calculator: 计算任意合法的数学表达式并返回结果, 参数: {\n\t\t\"type\": \"object\",\n\t\t\"properties\": {\n\t\t\t\"expr\": {\"type\": \"string\", \"description\": \"要计算的数学表达式\"}\n\t\t},\n\t\t\"required\": [\"expr\"]\n\t}\n- now: 返回当前时间, 参数: {\n\t\t\"type\": \"object\",\n\t}\n\n每一轮必须严格使用以下格式之一：\n\nThought: 你的简短思考\nAction: 要使用的工具名称\nAction Input: 调用工具的 JSON 参数\n\n或者在任务完成时输出：\n\nFinal Answer: 给用户的最终答案\n\n工具执行结果会由程序作为 Observation 返回。"
+    },
+    {
+      "role": "user",
+      "content": "你可以干嘛"
+    },
+    {
+      "role": "assistant",
+      "content": "Final Answer: 我可以计算各种合法的数学表达式（如加减乘除、幂、根号等），以及获取当前时间。我能帮你完成需要这些工具支持的任务。"
+    },
+    {
+      "role": "user",
+      "content": "目前使用了多少token了？"
+    },
+    {
+      "role": "assistant",
+      "content": "Final Answer: 我目前没有记录或计算整个对话历史的token使用量，无法给出精确数字。如果你指的是API调用token或模型输入输出token，请提供更多上下文，我可以帮你估算大致字符数（1 token ≈ 4字符，中文稍少）。"
+    },
+    {
+      "role": "user",
+      "content": "你没法通过stroe存储的文件来查看使用了多少to吗？"
+    },
+    {
+      "role": "assistant",
+      "content": "Final Answer: 不，我没法通过任何“store”存储的文件来查看token使用量。我没有持久化存储或文件系统访问能力，也无法记录整个对话的token消耗（这不是我的设计）。如果你想估算对话长度，我可以帮你粗略计算字符数（大致1 token ≈ 3-4个字符），但精确值我无法提供。"
+    },
+    {
+      "role": "user",
+      "content": "我问你的上一个问题是什么？"
+    },
+    {
+      "role": "assistant",
+      "content": "Final Answer: 上一个问题是“你没法通过stroe存储的文件来查看使用了多少to吗？”（注意“to”应该是“token”的打字错误，你当时在问我能不能通过存储文件查看token使用量）"
+    },
+    {
+      "role": "user",
+      "content": "现在几点了？"
+    },
+    {
+      "role": "assistant",
+      "content": "Thought: 用户问现在几点了，需要调用now工具获取当前时间\nAction: now\nAction Input: {}"
+    },
+    {
+      "role": "user",
+      "content": "Observation: 2026-09-07 14:20:39.474936335 +0800 CST m=+451.557437484"
+    },
+    {
+      "role": "assistant",
+      "content": "Final Answer: 当前时间是 2026-09-07 14:20:39（CST，中国标准时间 +08:00）"
+    }
+  ],
+  "step": 6,
+  "phase": "done",
+  "answer": "当前时间是 2026-09-07 14:20:39（CST，中国标准时间 +08:00）",
+  "usage": {
+    "input_tokens": 3236,
+    "output_tokens": 4380
+  },
+  "action_counts": {
+    "now:{}": 1
+  },
+  "started_at": "2026-09-07T11:28:09.963950565+08:00",
+  "updated_at": "2026-09-07T14:20:56.908593821+08:00"
+}

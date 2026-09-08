@@ -22,7 +22,7 @@ type FileStore struct{ dir string }
 // NewFileStore 创建一个将状态落盘到指定目录的 FileStore 实例。
 func NewFileStore(dir string) *FileStore { return &FileStore{dir: dir} }
 
-func (store *FileStore) Save(_ context.Context, sessionID string, state *State) error {
+func (store *FileStore) Save(ctx context.Context, sessionID string, state *State) error {
 	if store == nil {
 		return fmt.Errorf("FileStore 未初始化")
 	}
@@ -36,7 +36,7 @@ func (store *FileStore) Save(_ context.Context, sessionID string, state *State) 
 	return os.WriteFile(store.path(sessionID), raw, 0o600)
 }
 
-func (store *FileStore) Load(_ context.Context, sessionID string) (*State, error) {
+func (store *FileStore) Load(ctx context.Context, sessionID string) (*State, error) {
 	if store == nil {
 		return nil, fmt.Errorf("FileStore 未初始化")
 	}
