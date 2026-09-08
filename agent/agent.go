@@ -255,21 +255,27 @@ func (agent *Agent) buildSystemPrompt() string {
 	return prompt
 }
 
-// agent 包：补一个公开的非流式入口（包装 M04 的 runFunctionCalling）
+// Run 启动 Agent 同步执行任务，直到完成或失败并返回最终回答。
 func (agent *Agent) Run(ctx context.Context, goal string) (string, error) {
 	out := make(chan AgentEvent, 16)
 	go func() {
 		defer close(out)
-		agent.run(ctx, goal, out) // run 会调用 runFunctionCalling
+		agent.run(ctx, goal, out)
 	}()
 
-	// 收集最终结果（简化版，实际可改进为接收 EventDone）
 	var answer string
+	var runErr error
 	for ev := range out {
-		if ev.Type == EventDone {
-			answer = ev.Text // 或从 state.Answer 取
+		switch ev.Type {
+		case EventDone:
+			answer = ev.Text
+		case EventError:
+			runErr = errors.New(ev.Text)
 		}
 	}
 
+	if runErr != nil {
+		return "", runErr
+	}
 	return answer, nil
 }
