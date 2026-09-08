@@ -8,26 +8,34 @@ import (
 	"github.com/Kirby980/agent/llm"
 )
 
-type Router struct {
+// Route 表示一条具体的意图路由规则与处理逻辑。
+type Route struct {
 	Name        string
 	Description string
 	Handle      func(ctx context.Context, input string) (string, error)
 }
 
-type InterRouter struct {
+// Router 是 Route 的别名，保持向下兼容。
+type Router = Route
+
+// IntentRouter 根据大模型意图分类结果将输入分发给对应 Route。
+type IntentRouter struct {
 	Provider llm.Provider
 	Model    string
-	Routes   []Router
-	Fallback func(ctx context.Context, input string) (string, error) // 备选
+	Routes   []Route
+	Fallback func(ctx context.Context, input string) (string, error) // 备选/兜底
 }
+
+// InterRouter 兼容旧名称别名。
+type InterRouter = IntentRouter
 
 type routeChoice struct {
-	Route string `json:"router"`
+	Route string `json:"route"`
 }
 
-func (r *InterRouter) Dispatch(ctx context.Context, input string) (string, error) {
+func (r *IntentRouter) Dispatch(ctx context.Context, input string) (string, error) {
 	name, err := r.classify(ctx, input)
-	if err != nil {
+	if err == nil {
 		for _, rt := range r.Routes {
 			if rt.Name == name {
 				return rt.Handle(ctx, input)
@@ -41,7 +49,7 @@ func (r *InterRouter) Dispatch(ctx context.Context, input string) (string, error
 	return "", fmt.Errorf("无法路由，且未配置兜底（意图=%q, err=%v）", name, err)
 }
 
-func (r *InterRouter) classify(ctx context.Context, input string) (string, error) {
+func (r *IntentRouter) classify(ctx context.Context, input string) (string, error) {
 	var b strings.Builder
 	for _, rt := range r.Routes {
 		fmt.Fprintf(&b, "- %s: %s\n", rt.Name, rt.Description)
@@ -53,7 +61,7 @@ func (r *InterRouter) classify(ctx context.Context, input string) (string, error
 	if err != nil {
 		return "", err
 	}
-	choice, err := llm.ParseInto[routeChoice](out)
+	choice, err := llm.ParseInto[routeChoice](cleanJSON(out))
 	if err != nil {
 		return "", fmt.Errorf("分类输出无法解析: %w", err)
 	}
