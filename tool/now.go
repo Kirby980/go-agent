@@ -15,13 +15,14 @@ func (n *Now) Name() string {
 func (n *Now) Description() string {
 	return "返回当前时间"
 }
-func (c *Now) Parameters() json.RawMessage {
+func (n *Now) Parameters() json.RawMessage {
 	return []byte(`{
 		"type": "object",
+		"properties": {}
 	}`)
 }
 
-func (c *Now) Call(ctx context.Context, args json.RawMessage) (string, error) {
+func (n *Now) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	t := time.Now().String()
 	return t, nil
 }

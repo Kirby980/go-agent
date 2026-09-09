@@ -33,20 +33,28 @@ type routeChoice struct {
 	Route string `json:"route"`
 }
 
-func (r *IntentRouter) Dispatch(ctx context.Context, input string) (string, error) {
+// DispatchWithRoute 执行意图路由并同时返回命中的路由名称。
+func (r *IntentRouter) DispatchWithRoute(ctx context.Context, input string) (string, string, error) {
 	name, err := r.classify(ctx, input)
 	if err == nil {
 		for _, rt := range r.Routes {
 			if rt.Name == name {
-				return rt.Handle(ctx, input)
+				res, err := rt.Handle(ctx, input)
+				return res, name, err
 			}
 		}
 	}
 	// 分类出错或没匹配上：走兜底（这本身就是一种优雅降级）
 	if r.Fallback != nil {
-		return r.Fallback(ctx, input)
+		res, err := r.Fallback(ctx, input)
+		return res, "fallback", err
 	}
-	return "", fmt.Errorf("无法路由，且未配置兜底（意图=%q, err=%v）", name, err)
+	return "", name, fmt.Errorf("无法路由，且未配置兜底（意图=%q, err=%v）", name, err)
+}
+
+func (r *IntentRouter) Dispatch(ctx context.Context, input string) (string, error) {
+	res, _, err := r.DispatchWithRoute(ctx, input)
+	return res, err
 }
 
 func (r *IntentRouter) classify(ctx context.Context, input string) (string, error) {

@@ -48,3 +48,16 @@ func TestRegistry(t *testing.T) {
 		t.Errorf("unexpected def: %+v", defs[0])
 	}
 }
+
+func TestBuiltinToolsValidJSON(t *testing.T) {
+	tools := []Tool{&Calculator{}, &Now{}}
+	for _, tl := range tools {
+		var js map[string]any
+		params := tl.Parameters()
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &js); err != nil {
+				t.Fatalf("tool %s parameters is not valid JSON: %v", tl.Name(), err)
+			}
+		}
+	}
+}

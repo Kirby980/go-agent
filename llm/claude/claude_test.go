@@ -72,7 +72,7 @@ func TestAdaptRequestJoinsSystem(t *testing.T) {
 	if got := body["system"]; got != "你是助手\n\n回答要简洁" {
 		t.Fatalf("多条 system 拼接错误: %q", got)
 	}
-	if n := len(body["messages"].([]map[string]string)); n != 1 {
+	if n := len(body["messages"].([]anthropicMsg)); n != 1 {
 		t.Fatalf("system 不该留在 messages 里，剩下 %d 条", n)
 	}
 }
@@ -147,5 +147,79 @@ func TestChatStreamEndToEnd(t *testing.T) {
 	}
 	if got.String() != "你好" {
 		t.Fatalf("拼接结果错误: %q", got.String())
+	}
+}
+
+func TestAdaptRequestToolsAndResults(t *testing.T) {
+	p := New(Config{Name: "claude"})
+	req := llm.ChatRequest{
+		Model: "claude-3-5-sonnet",
+		Tools: []llm.ToolDef{
+			{Name: "get_weather", Description: "查天气", Parameters: []byte(`{"type":"object"}`)},
+		},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: "查天气"},
+			{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Name: "get_weather", Args: []byte(`{"city":"北京"}`)},
+				{ID: "call_2", Name: "get_weather", Args: []byte(`{"city":"上海"}`)},
+			}},
+			{Role: llm.RoleTool, ToolCallID: "call_1", Content: "晴天"},
+			{Role: llm.RoleTool, ToolCallID: "call_2", Content: "多云"},
+		},
+	}
+
+	body, err := p.adaptRequest(req)
+	if err != nil {
+		t.Fatalf("adaptRequest 失败: %v", err)
+	}
+
+	tools, ok := body["tools"].([]anthropicTool)
+	if !ok || len(tools) != 1 || tools[0].Name != "get_weather" {
+		t.Fatalf("tools 映射错误: %+v", body["tools"])
+	}
+
+	msgs, ok := body["messages"].([]anthropicMsg)
+	if !ok || len(msgs) != 3 {
+		t.Fatalf("messages 映射错误: got %d messages, want 3 (user, assistant, merged user)", len(msgs))
+	}
+
+	// 验证两个并发 tool_result 是否合并在同一个 user message 中
+	lastMsg := msgs[2]
+	if lastMsg.Role != "user" || len(lastMsg.Content) != 2 {
+		t.Fatalf("consecutive tool_result 没正确合并到同一个 user 消息中: %+v", lastMsg)
+	}
+	if lastMsg.Content[0].Type != "tool_result" || lastMsg.Content[0].ToolUseID != "call_1" {
+		t.Errorf("tool_result 0 错误: %+v", lastMsg.Content[0])
+	}
+	if lastMsg.Content[1].Type != "tool_result" || lastMsg.Content[1].ToolUseID != "call_2" {
+		t.Errorf("tool_result 1 错误: %+v", lastMsg.Content[1])
+	}
+}
+
+func TestAdaptResponseToolCalls(t *testing.T) {
+	p := New(Config{Name: "claude"})
+	mockJSON := `{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-3-5-sonnet",
+		"content": [
+			{"type": "text", "text": "我来查询"},
+			{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city":"北京"}}
+		],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 10, "output_tokens": 20}
+	}`
+
+	resp, err := p.adaptResponse(io.NopCloser(strings.NewReader(mockJSON)))
+	if err != nil {
+		t.Fatalf("adaptResponse 失败: %v", err)
+	}
+
+	if resp.Content != "我来查询" {
+		t.Errorf("got content %q, want '我来查询'", resp.Content)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "toolu_1" || resp.ToolCalls[0].Name != "get_weather" {
+		t.Errorf("tool_calls 错误: %+v", resp.ToolCalls)
 	}
 }

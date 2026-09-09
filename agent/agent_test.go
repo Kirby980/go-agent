@@ -125,3 +125,177 @@ func TestInitialState_WithStore(t *testing.T) {
 		t.Errorf("unexpected message 3: %+v", st2.Messages[3])
 	}
 }
+
+type trackingProvider struct {
+	tools       bool
+	streaming   bool
+	chatFunc    func(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error)
+	streamFunc  func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error)
+	chatCalls   int
+	streamCalls int
+}
+
+func (t *trackingProvider) Name() string { return "tracking-mock" }
+func (t *trackingProvider) Capabilities() llm.Capability {
+	return llm.Capability{Tools: t.tools, Streaming: t.streaming}
+}
+func (t *trackingProvider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+	t.chatCalls++
+	if t.chatFunc != nil {
+		return t.chatFunc(ctx, req)
+	}
+	return &llm.ChatResponse{Content: "chat reply"}, nil
+}
+func (t *trackingProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	t.streamCalls++
+	if t.streamFunc != nil {
+		return t.streamFunc(ctx, req)
+	}
+	ch := make(chan llm.StreamChunk, 2)
+	ch <- llm.StreamChunk{Content: "stream reply"}
+	close(ch)
+	return ch, nil
+}
+
+func TestRun_NonStreaming_FunctionCalling(t *testing.T) {
+	p := &trackingProvider{tools: true, streaming: true}
+	ag := New(p, "test-model", tool.NewRegistry())
+
+	ans, err := ag.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ans != "chat reply" {
+		t.Errorf("expected 'chat reply', got %q", ans)
+	}
+	if p.chatCalls != 1 {
+		t.Errorf("expected 1 Chat call, got %d", p.chatCalls)
+	}
+	if p.streamCalls != 0 {
+		t.Errorf("expected 0 ChatStream calls, got %d", p.streamCalls)
+	}
+}
+
+func TestRunStream_Streaming_FunctionCalling(t *testing.T) {
+	p := &trackingProvider{tools: true, streaming: true}
+	p.streamFunc = func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+		ch := make(chan llm.StreamChunk, 3)
+		ch <- llm.StreamChunk{Content: "Hello "}
+		ch <- llm.StreamChunk{Content: "World"}
+		close(ch)
+		return ch, nil
+	}
+	ag := New(p, "test-model", tool.NewRegistry())
+
+	var deltas []string
+	doneSeen := false
+	for ev := range ag.RunStream(context.Background(), "hello") {
+		switch ev.Type {
+		case EventAnswerDelta:
+			deltas = append(deltas, ev.Text)
+		case EventDone:
+			doneSeen = true
+		}
+	}
+
+	if p.streamCalls != 1 {
+		t.Errorf("expected 1 ChatStream call, got %d", p.streamCalls)
+	}
+	if p.chatCalls != 0 {
+		t.Errorf("expected 0 Chat calls, got %d", p.chatCalls)
+	}
+	if strings.Join(deltas, "") != "Hello World" {
+		t.Errorf("expected 'Hello World', got %q", strings.Join(deltas, ""))
+	}
+	if !doneSeen {
+		t.Errorf("expected EventDone to be emitted")
+	}
+}
+
+func TestRun_NonStreaming_ReAct(t *testing.T) {
+	p := &trackingProvider{tools: false, streaming: true}
+	p.chatFunc = func(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+		return &llm.ChatResponse{Content: "Thought: I know the answer\nFinal Answer: 42"}, nil
+	}
+	ag := New(p, "test-model", tool.NewRegistry())
+
+	ans, err := ag.Run(context.Background(), "what is the answer?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ans != "42" {
+		t.Errorf("expected '42', got %q", ans)
+	}
+	if p.chatCalls != 1 {
+		t.Errorf("expected 1 Chat call, got %d", p.chatCalls)
+	}
+	if p.streamCalls != 0 {
+		t.Errorf("expected 0 ChatStream calls, got %d", p.streamCalls)
+	}
+}
+
+func TestRunStream_Streaming_ReAct(t *testing.T) {
+	p := &trackingProvider{tools: false, streaming: true}
+	p.streamFunc = func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+		ch := make(chan llm.StreamChunk, 5)
+		ch <- llm.StreamChunk{Content: "Thought: I am thinking\n"}
+		ch <- llm.StreamChunk{Content: "Final Answer: "}
+		ch <- llm.StreamChunk{Content: "4"}
+		ch <- llm.StreamChunk{Content: "2"}
+		close(ch)
+		return ch, nil
+	}
+	ag := New(p, "test-model", tool.NewRegistry())
+
+	var deltas []string
+	var thoughts []string
+	doneSeen := false
+	for ev := range ag.RunStream(context.Background(), "what is the answer?") {
+		switch ev.Type {
+		case EventAnswerDelta:
+			deltas = append(deltas, ev.Text)
+		case EventThought:
+			thoughts = append(thoughts, ev.Text)
+		case EventDone:
+			doneSeen = true
+		}
+	}
+
+	if p.streamCalls != 1 {
+		t.Errorf("expected 1 ChatStream call, got %d", p.streamCalls)
+	}
+	if p.chatCalls != 0 {
+		t.Errorf("expected 0 Chat calls, got %d", p.chatCalls)
+	}
+	if strings.Join(deltas, "") != "42" {
+		t.Errorf("expected '42', got %q", strings.Join(deltas, ""))
+	}
+	if !doneSeen {
+		t.Errorf("expected EventDone to be emitted")
+	}
+}
+
+func TestRunStream_FallbackWhenNoStreamingCapability(t *testing.T) {
+	p := &trackingProvider{tools: false, streaming: false} // streaming capability disabled
+	p.chatFunc = func(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+		return &llm.ChatResponse{Content: "Thought: fallback\nFinal Answer: 99"}, nil
+	}
+	ag := New(p, "test-model", tool.NewRegistry())
+
+	var deltas []string
+	for ev := range ag.RunStream(context.Background(), "test fallback") {
+		if ev.Type == EventAnswerDelta {
+			deltas = append(deltas, ev.Text)
+		}
+	}
+
+	if p.chatCalls != 1 {
+		t.Errorf("expected 1 Chat call (fallback), got %d", p.chatCalls)
+	}
+	if p.streamCalls != 0 {
+		t.Errorf("expected 0 ChatStream calls, got %d", p.streamCalls)
+	}
+	if strings.Join(deltas, "") != "99" {
+		t.Errorf("expected '99', got %q", strings.Join(deltas, ""))
+	}
+}

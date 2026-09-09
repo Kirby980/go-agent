@@ -30,6 +30,16 @@ type Config struct {
 	APIKey  string // 认证 API 密钥
 }
 
+type chatReq struct {
+	Model       string       `json:"model"`
+	Messages    []chatMsg    `json:"messages"`
+	Temperature *float64     `json:"temperature,omitempty"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
+	Stream      bool         `json:"stream,omitempty"`
+	Stop        []string     `json:"stop,omitempty"` // 命中任一序列时模型停止生成
+	Tools       []openaiTool `json:"tools,omitempty"`
+}
+
 // New 创建并返回一个 OpenAI 兼容的 Provider 实例。
 func New(cfg Config) *Provider {
 	return &Provider{
@@ -43,7 +53,7 @@ func New(cfg Config) *Provider {
 func (p *Provider) Name() string { return p.name }
 
 func (p *Provider) Capabilities() llm.Capability {
-	return llm.Capability{Streaming: true}
+	return llm.Capability{Streaming: true, Tools: true}
 }
 
 // parseAPIError 解析 OpenAI 兼容的错误响应：
@@ -77,11 +87,9 @@ func (p *Provider) parseAPIError(resp *http.Response) error {
 }
 
 func (p *Provider) validateMessages(messages []llm.Message) error {
-	// M02 的 Message 还不能表达 OpenAI 工具结果要求的 tool_call_id，
-	// 因此不能把 RoleTool 直接序列化后发给接口。
 	for _, m := range messages {
 		if m.Role == llm.RoleTool {
-			return fmt.Errorf("%s: M02 尚未实现 tool message 协议", p.name)
+			return nil
 		}
 	}
 	return nil
@@ -115,8 +123,17 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 	if err := p.validateMessages(req.Messages); err != nil {
 		return nil, err
 	}
-	req.Stream = false             // Chat 是非流式入口；流式走 ChatStream，别让调用方误传出一个解析不了的 SSE body
-	body, err := json.Marshal(req) // M06 接工具时会进一步细化请求体
+	req.Stream = false // Chat 是非流式入口；流式走 ChatStream，别让调用方误传出一个解析不了的 SSE body
+	payload := chatReq{
+		Model:       req.Model,
+		Messages:    toOpenAIMessages(req.Messages),
+		Tools:       toOpenAITools(req.Tools),
+		Stream:      req.Stream,
+		Stop:        req.Stop,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 序列化请求: %w", p.name, err)
 	}
@@ -144,7 +161,9 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 	var out struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Role      string         `json:"role"`
+				Content   string         `json:"content"`
+				ToolCalls []respToolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -158,10 +177,12 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 	if len(out.Choices) == 0 {
 		return nil, fmt.Errorf("%s: 空响应", p.name)
 	}
+	msg := out.Choices[0].Message
 	return &llm.ChatResponse{
-		Content:      out.Choices[0].Message.Content,
+		Content:      msg.Content,
 		InputTokens:  out.Usage.PromptTokens,
 		OutputTokens: out.Usage.CompletionTokens,
+		ToolCalls:    parseToolCalls(msg.ToolCalls),
 	}, nil
 }
 
@@ -185,8 +206,16 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 	if err != nil {
 		return nil, err
 	}
-	req.Stream = true
-	body, err := json.Marshal(req) // M06 接工具时会进一步细化请求体
+	payload := chatReq{
+		Model:       req.Model,
+		Messages:    toOpenAIMessages(req.Messages),
+		Tools:       toOpenAITools(req.Tools),
+		Stream:      true,
+		Stop:        req.Stop,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 序列化请求: %w", p.name, err)
 	}
@@ -215,21 +244,47 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
+
+		type partialToolCall struct {
+			id   string
+			name string
+			args strings.Builder
+		}
+		toolCallsMap := make(map[int]*partialToolCall)
+		maxIndex := -1
+
 		streamErr := transport.ParseSSE(resp.Body, func(data []byte) error {
-			delta, done, err := p.parseOpenAIDelta(data)
+			ev, done, err := p.parseOpenAIStreamEvent(data)
 			if err != nil {
 				return err
 			}
 			if done {
 				return errStreamDone // 提前收尾，别等服务端关连接
 			}
-			if delta == "" {
+			for _, tc := range ev.ToolCalls {
+				ptc, ok := toolCallsMap[tc.Index]
+				if !ok {
+					ptc = &partialToolCall{}
+					toolCallsMap[tc.Index] = ptc
+					if tc.Index > maxIndex {
+						maxIndex = tc.Index
+					}
+				}
+				if tc.ID != "" {
+					ptc.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					ptc.name = tc.Function.Name
+				}
+				ptc.args.WriteString(tc.Function.Arguments)
+			}
+			if ev.Content == "" {
 				return nil
 			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case out <- llm.StreamChunk{Content: delta}:
+			case out <- llm.StreamChunk{Content: ev.Content}:
 				return nil
 			}
 		})
@@ -244,24 +299,55 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 			case <-ctx.Done():
 			case out <- llm.StreamChunk{Err: streamErr}:
 			}
+			return
+		}
+
+		if len(toolCallsMap) > 0 {
+			var calls []llm.ToolCall
+			for i := 0; i <= maxIndex; i++ {
+				if ptc, ok := toolCallsMap[i]; ok {
+					calls = append(calls, llm.ToolCall{
+						ID:   ptc.id,
+						Name: ptc.name,
+						Args: json.RawMessage(ptc.args.String()),
+					})
+				}
+			}
+			select {
+			case <-ctx.Done():
+			case out <- llm.StreamChunk{ToolCalls: calls}:
+			}
 		}
 	}()
 	return out, nil
 }
 
-// parseOpenAIDelta 按照openai流格式解析数据
-func (p *Provider) parseOpenAIDelta(data []byte) (delta string, done bool, err error) {
+type streamToolCallChunk struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function"`
+}
+
+type openAIStreamEvent struct {
+	Content   string
+	ToolCalls []streamToolCallChunk
+}
+
+func (p *Provider) parseOpenAIStreamEvent(data []byte) (event openAIStreamEvent, done bool, err error) {
 	if string(data) == "[DONE]" {
-		return "", true, nil
+		return openAIStreamEvent{}, true, nil
 	}
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
+				Content   string                `json:"content"`
+				ToolCalls []streamToolCallChunk `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
-		// 流已经开始后上游才出错（内容过滤、超时、余额耗尽）只能走这里——
-		// HTTP 头早发出去了，拿不到非 200。漏掉它会把真实原因换成"流在 [DONE] 前结束"。
 		Error *struct {
 			Message string `json:"message"`
 			Type    string `json:"type"`
@@ -269,18 +355,29 @@ func (p *Provider) parseOpenAIDelta(data []byte) (delta string, done bool, err e
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &chunk); err != nil {
-		return "", false, fmt.Errorf("%s: 解析流事件失败: %w (原文 %.200q)", p.name, err, data)
+		return openAIStreamEvent{}, false, fmt.Errorf("%s: 解析流事件失败: %w (原文 %.200q)", p.name, err, data)
 	}
 	if chunk.Error != nil {
 		kind := chunk.Error.Type
 		if kind == "" {
 			kind = chunk.Error.Code
 		}
-		return "", false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, kind, chunk.Error.Message)
+		return openAIStreamEvent{}, false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, kind, chunk.Error.Message)
 	}
-	// 可能是只携带 usage 的结束事件
 	if len(chunk.Choices) == 0 {
-		return "", false, nil
+		return openAIStreamEvent{}, false, nil
 	}
-	return chunk.Choices[0].Delta.Content, false, nil
+	return openAIStreamEvent{
+		Content:   chunk.Choices[0].Delta.Content,
+		ToolCalls: chunk.Choices[0].Delta.ToolCalls,
+	}, false, nil
+}
+
+// parseOpenAIDelta 按照openai流格式解析数据
+func (p *Provider) parseOpenAIDelta(data []byte) (delta string, done bool, err error) {
+	ev, done, err := p.parseOpenAIStreamEvent(data)
+	if err != nil || done {
+		return "", done, err
+	}
+	return ev.Content, false, nil
 }

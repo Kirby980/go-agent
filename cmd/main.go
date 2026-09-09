@@ -36,7 +36,7 @@ func main() {
 		}
 	}()
 
-	if err := pattern(ctx, cfg); err != nil {
+	if err := runOnce(ctx, cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "\n出错:", err)
 		close(done)
 		os.Exit(1)
@@ -110,11 +110,11 @@ func runOnce(ctx context.Context, cfg Config) error {
 				case agent.EventToolResult:
 					fmt.Printf("[工具结果] %s\n", ev.Text)
 				case agent.EventAnswerDelta:
-					fmt.Println(ev.Text)
+					fmt.Print(ev.Text)
 				case agent.EventError:
-					fmt.Fprintln(os.Stderr, "[错误]", ev.Text)
+					fmt.Fprintln(os.Stderr, "\n[错误]", ev.Text)
 				case agent.EventDone:
-					fmt.Println("[完成]")
+					fmt.Println("\n[完成]")
 					outputCh <- ""
 				}
 			}
@@ -124,34 +124,7 @@ func runOnce(ctx context.Context, cfg Config) error {
 
 func pattern(ctx context.Context, cfg Config) error {
 	c := BuildProviders(cfg)
-	resp, err := patterns.PGE(ctx, c[0], "grok-4.6", `func main() {
-	// Ctrl+C → context 取消
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	cfg := loadConfigFromEnv() // TODO: 读取 BASE_URL / API_KEY / MODEL
-
-	// 强制退出守护：收到 SIGINT 后给出最多 3 秒用于清理，3 秒后强制退出。
-	done := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		timer := time.NewTimer(3 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-done:
-			return // runOnce 已完成，取消强制退出
-		case <-timer.C:
-			fmt.Fprintln(os.Stderr, "\n超时，强制退出")
-			os.Exit(1)
-		}
-	}()
-
-	if err := runOnce(ctx, cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "\n出错:", err)
-		close(done)
-		os.Exit(1)
-	}
-	close(done)
-}`, 3)
+	resp, err := patterns.PGE(ctx, c[0], "grok-4.6", `帮我生成一个golang的基本代码`, 3)
 	if err != nil {
 		return err
 	}

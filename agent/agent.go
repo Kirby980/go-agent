@@ -125,7 +125,7 @@ func (agent *Agent) RunStream(ctx context.Context, goal string) <-chan AgentEven
 	out := make(chan AgentEvent, 16)
 	go func() {
 		defer close(out) // M01 纪律：生产者负责关闭
-		agent.run(ctx, goal, out)
+		agent.run(ctx, goal, true, out)
 	}()
 	return out
 }
@@ -136,7 +136,7 @@ func (agent *Agent) RunStream(ctx context.Context, goal string) <-chan AgentEven
 // 3. 根据底层 Provider 是否支持原生 Function Calling 决定分流：
 //   - 支持 Tools: 进入 runFunctionCalling 原生工具调用循环
 //   - 不支持: 降级进入 runReAct（Thought-Action-Observation 文本自愈循环）
-func (agent *Agent) run(ctx context.Context, goal string, out chan<- AgentEvent) {
+func (agent *Agent) run(ctx context.Context, goal string, stream bool, out chan<- AgentEvent) {
 	emit := func(event AgentEvent) bool {
 		select {
 		case <-ctx.Done():
@@ -159,10 +159,10 @@ func (agent *Agent) run(ctx context.Context, goal string, out chan<- AgentEvent)
 		return
 	}
 	if agent.provider.Capabilities().Tools {
-		agent.runFunctionCalling(ctx, state, emit)
+		agent.runFunctionCalling(ctx, state, stream, emit)
 		return
 	}
-	agent.runReAct(ctx, state, emit)
+	agent.runReAct(ctx, state, stream, emit)
 }
 
 // initialState 构造或恢复本次执行的状态快照：
@@ -206,13 +206,16 @@ func (agent *Agent) initialState(ctx context.Context, goal string) (*State, erro
 			state.ActionCounts = make(map[string]int)
 		}
 		state.UpdatedAt = now
+		sysPrompt := agent.buildSystemPrompt()
 		if len(state.Messages) == 0 {
-			if sysPrompt := agent.buildSystemPrompt(); sysPrompt != "" {
+			if sysPrompt != "" {
 				state.Messages = append(state.Messages, llm.Message{
 					Role:    llm.RoleSystem,
 					Content: sysPrompt,
 				})
 			}
+		} else if state.Messages[0].Role == llm.RoleSystem && sysPrompt != "" {
+			state.Messages[0].Content = sysPrompt
 		}
 	}
 
@@ -260,15 +263,19 @@ func (agent *Agent) Run(ctx context.Context, goal string) (string, error) {
 	out := make(chan AgentEvent, 16)
 	go func() {
 		defer close(out)
-		agent.run(ctx, goal, out)
+		agent.run(ctx, goal, false, out)
 	}()
 
 	var answer string
 	var runErr error
 	for ev := range out {
 		switch ev.Type {
+		case EventAnswerDelta:
+			answer += ev.Text
 		case EventDone:
-			answer = ev.Text
+			if ev.Text != "" {
+				answer = ev.Text
+			}
 		case EventError:
 			runErr = errors.New(ev.Text)
 		}

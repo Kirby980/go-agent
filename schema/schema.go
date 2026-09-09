@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"time"
@@ -95,4 +96,12 @@ func generateSchema(t reflect.Type) *Schema {
 func isOptional(tag string) bool {
 	tag = strings.ToLower(strings.TrimSpace(tag))
 	return tag == "true"
+}
+
+func MustJson(s *Schema) json.RawMessage {
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

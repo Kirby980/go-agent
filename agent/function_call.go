@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,13 +12,14 @@ import (
 
 // runFunctionCalling 实现基于模型原生 Function Calling 能力的自主运行循环：
 // 1. 每轮前检查预算限制（步数、token上限、截止时间等）
-// 2. 向模型发起带有当前可用工具列表 Tools 的聊天请求
+// 2. 向模型发起带有当前可用工具列表 Tools 的聊天请求（根据 stream 参数选择 ChatStream 或 Chat）
 // 3. 若模型未发起 ToolCalls，则判定为最终答案，状态置为 PhaseDone，发出增量及完成事件并持久化
 // 4. 若模型发起了 ToolCalls，则遍历调用工具，产生 Observation 结果，以 RoleTool 消息携带对应 ToolCallID 回填
 // 5. 循环回到第 1 步，直到完成或超出预算
 func (agent *Agent) runFunctionCalling(
 	ctx context.Context,
 	state *State,
+	stream bool,
 	emit func(AgentEvent) bool,
 ) {
 	for {
@@ -25,23 +28,79 @@ func (agent *Agent) runFunctionCalling(
 			return
 		}
 
-		resp, err := agent.provider.Chat(ctx, llm.ChatRequest{
+		req := llm.ChatRequest{
 			Model:    agent.model,
 			Messages: state.Messages,
 			Tools:    agent.toolDefs(),
-		})
-		if err != nil {
-			agent.finishError(ctx, state, emit, err.Error())
-			return
 		}
+
+		var content string
+		var toolCalls []llm.ToolCall
+		var streamedAnswerDeltas bool
+
+		if stream && agent.provider.Capabilities().Streaming {
+			streamCh, err := agent.provider.ChatStream(ctx, req)
+			if err != nil {
+				agent.finishError(ctx, state, emit, err.Error())
+				return
+			}
+
+			var fullContent strings.Builder
+
+			for chunk := range streamCh {
+				if chunk.Err != nil {
+					agent.finishError(ctx, state, emit, chunk.Err.Error())
+					return
+				}
+				if chunk.Content != "" {
+					fullContent.WriteString(chunk.Content)
+					if !strings.HasPrefix(strings.TrimSpace(fullContent.String()), "Thought:") {
+						emit(AgentEvent{Type: EventAnswerDelta, Text: chunk.Content, Step: state.Step})
+						streamedAnswerDeltas = true
+					}
+				}
+				if len(chunk.ToolCalls) > 0 {
+					toolCalls = append(toolCalls, chunk.ToolCalls...)
+				}
+			}
+			content = fullContent.String()
+		} else {
+			resp, err := agent.provider.Chat(ctx, req)
+			if err != nil {
+				agent.finishError(ctx, state, emit, err.Error())
+				return
+			}
+			state.Usage.InputTokens += resp.InputTokens
+			state.Usage.OutputTokens += resp.OutputTokens
+			content = resp.Content
+			toolCalls = resp.ToolCalls
+		}
+
 		state.Step++
-		state.Usage.InputTokens += resp.InputTokens
-		state.Usage.OutputTokens += resp.OutputTokens
 		state.UpdatedAt = time.Now()
 
+		// 检查是否通过文本降级输出了 ReAct 格式动作（Thought/Action/Action Input）
+		if len(toolCalls) == 0 {
+			if step, err := parseReact(content); err == nil && step.Action != "" {
+				toolCalls = []llm.ToolCall{
+					{
+						ID:   fmt.Sprintf("call_react_%d", state.Step),
+						Name: step.Action,
+						Args: json.RawMessage(step.ActionInput),
+					},
+				}
+				if step.Thought != "" {
+					content = step.Thought
+				}
+			}
+		}
+
 		// 模型没有要调用任何工具 → 这就是最终答案
-		if len(resp.ToolCalls) == 0 {
-			answer := strings.TrimSpace(resp.Content)
+		if len(toolCalls) == 0 {
+			answer := strings.TrimSpace(content)
+			if step, err := parseReact(content); err == nil && step.FinalAnswer != "" {
+				answer = step.FinalAnswer
+			}
 			if answer == "" {
 				agent.finishError(ctx, state, emit, "模型返回空响应：没有回答内容，也没有工具调用")
 				return
@@ -53,23 +112,25 @@ func (agent *Agent) runFunctionCalling(
 				Content: answer,
 			})
 			agent.checkpoint(ctx, state)
-			emit(AgentEvent{Type: EventAnswerDelta, Text: answer, Step: state.Step})
+			if !streamedAnswerDeltas {
+				emit(AgentEvent{Type: EventAnswerDelta, Text: answer, Step: state.Step})
+			}
 			emit(AgentEvent{Type: EventDone, Step: state.Step})
 			return
 		}
 
 		state.Phase = PhaseActing
-		if strings.TrimSpace(resp.Content) != "" {
-			emit(AgentEvent{Type: EventThought, Text: resp.Content, Step: state.Step})
+		if strings.TrimSpace(content) != "" {
+			emit(AgentEvent{Type: EventThought, Text: content, Step: state.Step})
 		}
 		state.Messages = append(state.Messages, llm.Message{
 			Role:      llm.RoleAssistant,
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
+			Content:   content,
+			ToolCalls: toolCalls,
 		})
 
 		// 逐个执行工具，每个结果作为一条 tool 消息回填（注意要带 ToolCallID）
-		for _, call := range resp.ToolCalls {
+		for _, call := range toolCalls {
 			if !agent.beforeToolCall(ctx, state, call.Name, call.Args, emit) {
 				return
 			}

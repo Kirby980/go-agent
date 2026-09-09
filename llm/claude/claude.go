@@ -43,7 +43,7 @@ func New(cfg Config) *Provider {
 func (p *Provider) Name() string { return p.name }
 
 func (p *Provider) Capabilities() llm.Capability {
-	return llm.Capability{Streaming: true}
+	return llm.Capability{Streaming: true, Tools: true}
 }
 
 // parseAPIError 解析 Anthropic 的错误响应：
@@ -80,22 +80,16 @@ func (p *Provider) parseAPIError(resp *http.Response) error {
 func (p *Provider) adaptRequest(req llm.ChatRequest) (map[string]any, error) {
 	// Anthropic 的 system 是独立字段，不在 messages 里；多条要拼起来。
 	var system strings.Builder
-	msgs := make([]map[string]string, 0, len(req.Messages))
+	var normalMsgs []llm.Message
 	for _, m := range req.Messages {
 		if m.Role == llm.RoleSystem {
 			if system.Len() > 0 {
-				system.WriteString("\n\n") // 没有分隔符会粘成一句话
+				system.WriteString("\n\n")
 			}
 			system.WriteString(m.Content)
 			continue
 		}
-		if m.Role != llm.RoleUser && m.Role != llm.RoleAssistant {
-			return nil, fmt.Errorf("%s: M02 尚未实现 role %q 的协议转换", p.name, m.Role)
-		}
-		msgs = append(msgs, map[string]string{
-			"role":    string(m.Role),
-			"content": m.Content,
-		})
+		normalMsgs = append(normalMsgs, m)
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -103,8 +97,11 @@ func (p *Provider) adaptRequest(req llm.ChatRequest) (map[string]any, error) {
 	}
 	body := map[string]any{
 		"model":      req.Model,
-		"messages":   msgs,
+		"messages":   toAnthropicMessages(normalMsgs),
 		"max_tokens": maxTokens,
+	}
+	if len(req.Tools) > 0 {
+		body["tools"] = toAnthropicTool(req.Tools)
 	}
 	if req.Stream {
 		body["stream"] = true
@@ -119,14 +116,6 @@ func (p *Provider) adaptRequest(req llm.ChatRequest) (map[string]any, error) {
 }
 
 func (p *Provider) adaptResponse(body io.ReadCloser) (*llm.ChatResponse, error) {
-	type ContentBlock struct {
-		Type  string      `json:"type"`            // "text" 或 "tool_use"
-		Text  string      `json:"text,omitempty"`  // 当 type == "text"
-		ID    string      `json:"id,omitempty"`    // 当 type == "tool_use"
-		Name  string      `json:"name,omitempty"`  // 当 type == "tool_use"
-		Input interface{} `json:"input,omitempty"` // 当 type == "tool_use"
-	}
-
 	type UsageInfo struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
@@ -136,7 +125,7 @@ func (p *Provider) adaptResponse(body io.ReadCloser) (*llm.ChatResponse, error) 
 		Type         string         `json:"type"`
 		Role         string         `json:"role"`
 		Model        string         `json:"model"`
-		Content      []ContentBlock `json:"content"`
+		Content      []contentBlock `json:"content"`
 		StopReason   string         `json:"stop_reason"`
 		StopSequence *string        `json:"stop_sequence"`
 		Usage        UsageInfo      `json:"usage"`
@@ -148,16 +137,12 @@ func (p *Provider) adaptResponse(body io.ReadCloser) (*llm.ChatResponse, error) 
 	resp := &llm.ChatResponse{}
 	resp.InputTokens = out.Usage.InputTokens
 	resp.OutputTokens = out.Usage.OutputTokens
-	text := strings.Builder{}
-	for _, v := range out.Content {
-		if v.Type == "text" {
-			text.WriteString(v.Text)
-		}
-	}
-	resp.Content = text.String()
+	text, toolCalls := parseAnthropicResponse(out.Content)
+	resp.Content = text
+	resp.ToolCalls = toolCalls
 	// tool_use 块目前被丢弃；如果模型只回了工具调用，Content 会是空串——
 	// 明说一声，免得上层拿到空响应还以为是网络问题。
-	if resp.Content == "" && out.StopReason != "" {
+	if resp.Content == "" && len(resp.ToolCalls) == 0 && out.StopReason != "" {
 		return resp, fmt.Errorf("%s: 无文本内容 (stop_reason=%s)", p.name, out.StopReason)
 	}
 	return resp, nil
@@ -297,23 +282,56 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
+
+		type partialToolCall struct {
+			id   string
+			name string
+			args strings.Builder
+		}
+		toolCallsMap := make(map[int]*partialToolCall)
+		maxIndex := -1
+
 		streamErr := transport.ParseSSE(resp.Body, func(data []byte) error {
-			delta, done, err := p.parseClaudeDelta(data)
+			ev, done, err := p.parseClaudeStreamEvent(data)
 			if err != nil {
 				return err
 			}
 			if done {
 				return errStreamDone
 			}
-			if delta == "" {
-				return nil
+			switch ev.Type {
+			case "text":
+				if ev.Content != "" {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case out <- llm.StreamChunk{Content: ev.Content}:
+						return nil
+					}
+				}
+			case "tool_start":
+				ptc, ok := toolCallsMap[ev.ToolCallIdx]
+				if !ok {
+					ptc = &partialToolCall{}
+					toolCallsMap[ev.ToolCallIdx] = ptc
+					if ev.ToolCallIdx > maxIndex {
+						maxIndex = ev.ToolCallIdx
+					}
+				}
+				ptc.id = ev.ToolCallID
+				ptc.name = ev.ToolCallName
+			case "tool_delta":
+				ptc, ok := toolCallsMap[ev.ToolCallIdx]
+				if !ok {
+					ptc = &partialToolCall{}
+					toolCallsMap[ev.ToolCallIdx] = ptc
+					if ev.ToolCallIdx > maxIndex {
+						maxIndex = ev.ToolCallIdx
+					}
+				}
+				ptc.args.WriteString(ev.PartialJSON)
 			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case out <- llm.StreamChunk{Content: delta}:
-				return nil
-			}
+			return nil
 		})
 		switch {
 		case errors.Is(streamErr, errStreamDone):
@@ -326,46 +344,110 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 			case <-ctx.Done():
 			case out <- llm.StreamChunk{Err: streamErr}:
 			}
+			return
+		}
+
+		if len(toolCallsMap) > 0 {
+			var calls []llm.ToolCall
+			for i := 0; i <= maxIndex; i++ {
+				if ptc, ok := toolCallsMap[i]; ok {
+					calls = append(calls, llm.ToolCall{
+						ID:   ptc.id,
+						Name: ptc.name,
+						Args: json.RawMessage(ptc.args.String()),
+					})
+				}
+			}
+			select {
+			case <-ctx.Done():
+			case out <- llm.StreamChunk{ToolCalls: calls}:
+			}
 		}
 	}()
 	return out, nil
+}
+
+type claudeStreamEvent struct {
+	Type         string
+	Content      string
+	ToolCallIdx  int
+	ToolCallID   string
+	ToolCallName string
+	PartialJSON  string
+}
+
+func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, done bool, err error) {
+	var raw struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock *struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta *struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+		Error *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return claudeStreamEvent{}, false, fmt.Errorf("%s: 解析流事件失败: %w (原文 %.200q)", p.name, err, data)
+	}
+	switch raw.Type {
+	case "error":
+		if raw.Error != nil {
+			return claudeStreamEvent{}, false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, raw.Error.Type, raw.Error.Message)
+		}
+		return claudeStreamEvent{}, false, fmt.Errorf("%s: 流内错误 (原文 %.200q)", p.name, data)
+	case "message_stop":
+		return claudeStreamEvent{}, true, nil
+	case "content_block_start":
+		if raw.ContentBlock != nil && raw.ContentBlock.Type == "tool_use" {
+			return claudeStreamEvent{
+				Type:         "tool_start",
+				ToolCallIdx:  raw.Index,
+				ToolCallID:   raw.ContentBlock.ID,
+				ToolCallName: raw.ContentBlock.Name,
+			}, false, nil
+		}
+		return claudeStreamEvent{}, false, nil
+	case "content_block_delta":
+		if raw.Delta != nil {
+			if raw.Delta.Type == "text_delta" {
+				return claudeStreamEvent{
+					Type:    "text",
+					Content: raw.Delta.Text,
+				}, false, nil
+			}
+			if raw.Delta.Type == "input_json_delta" {
+				return claudeStreamEvent{
+					Type:        "tool_delta",
+					ToolCallIdx: raw.Index,
+					PartialJSON: raw.Delta.PartialJSON,
+				}, false, nil
+			}
+		}
+		return claudeStreamEvent{}, false, nil
+	default:
+		return claudeStreamEvent{}, false, nil
+	}
 }
 
 // parseClaudeDelta 解析 Anthropic 流事件。
 // 与 OpenAI 的两点不同：结束标记是 message_stop（不是 [DONE]），
 // 且事件种类要靠 data 里的 type 字段区分——ParseSSE 只交出 data，不交 event 行。
 func (p *Provider) parseClaudeDelta(data []byte) (delta string, done bool, err error) {
-	var ev struct {
-		Type  string `json:"type"`
-		Delta struct {
-			Type string `json:"type"` // text_delta / thinking_delta / input_json_delta
-			Text string `json:"text"`
-		} `json:"delta"`
-		// 流开始后才出错（overloaded_error 等）只能走这里，HTTP 状态码已经是 200 了。
-		Error *struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
+	ev, done, err := p.parseClaudeStreamEvent(data)
+	if err != nil || done {
+		return "", done, err
 	}
-	if err := json.Unmarshal(data, &ev); err != nil {
-		return "", false, fmt.Errorf("%s: 解析流事件失败: %w (原文 %.200q)", p.name, err, data)
+	if ev.Type == "text" {
+		return ev.Content, false, nil
 	}
-	switch ev.Type {
-	case "error":
-		if ev.Error != nil {
-			return "", false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, ev.Error.Type, ev.Error.Message)
-		}
-		return "", false, fmt.Errorf("%s: 流内错误 (原文 %.200q)", p.name, data)
-	case "message_stop":
-		return "", true, nil
-	case "content_block_delta":
-		// thinking_delta / input_json_delta 是思考和工具入参，M02 的统一结构还接不住，先忽略
-		if ev.Delta.Type == "text_delta" {
-			return ev.Delta.Text, false, nil
-		}
-		return "", false, nil
-	default:
-		// ping / message_start / content_block_start / content_block_stop / message_delta
-		return "", false, nil
-	}
+	return "", false, nil
 }

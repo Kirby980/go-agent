@@ -12,11 +12,11 @@ import (
 
 // runReAct 实现经典 ReAct（Reasoning + Acting）推理决策循环：
 // 1. 检查预算限制
-// 2. 将 Observation: 作为 Stop 标志向模型发起思考请求
+// 2. 将 Observation: 作为 Stop 标志向模型发起思考请求（根据 stream 参数选择 ChatStream 或 Chat）
 // 3. 解析模型输出（Thought, Action, Action Input, Final Answer）
 // 4. 自愈机制：若模型未按规范输出，构造错误 Observation 反馈给模型让其纠错（最多重试 maxHealAttempts 次）
 // 5. 若输出 Final Answer 则正常结束；若输出 Action 则调用相应工具，并将结果拼接为 Observation 追加到历史中继续循环
-func (agent *Agent) runReAct(ctx context.Context, state *State, emit func(AgentEvent) bool) {
+func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emit func(AgentEvent) bool) {
 	healAttempts := 0
 	for {
 		// --停止条件检查
@@ -25,32 +25,78 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, emit func(AgentE
 			return
 		}
 
-		// --思考阶段
-		resp, err := agent.provider.Chat(ctx, llm.ChatRequest{
+		req := llm.ChatRequest{
 			Model:    agent.model,
 			Messages: state.Messages,
 			Stop:     []string{"Observation:"},
-		})
-		if err != nil {
-			agent.finishError(ctx, state, emit, err.Error())
-			return
+		}
+
+		var content string
+		var streamedAnswerDeltas bool
+
+		if stream && agent.provider.Capabilities().Streaming {
+			streamCh, err := agent.provider.ChatStream(ctx, req)
+			if err != nil {
+				agent.finishError(ctx, state, emit, err.Error())
+				return
+			}
+
+			var fullContent strings.Builder
+			var emittedLen int
+
+			for chunk := range streamCh {
+				if chunk.Err != nil {
+					agent.finishError(ctx, state, emit, chunk.Err.Error())
+					return
+				}
+				fullContent.WriteString(chunk.Content)
+				curr := fullContent.String()
+
+				// 实时检测 Final Answer: 并逐字流式发出增量
+				if idx := strings.Index(curr, "Final Answer:"); idx != -1 {
+					tail := curr[idx+len("Final Answer:"):]
+					if !streamedAnswerDeltas {
+						trimmed := strings.TrimLeft(tail, " \t\r\n")
+						if len(trimmed) > 0 {
+							emit(AgentEvent{Type: EventAnswerDelta, Text: trimmed, Step: state.Step})
+							emittedLen = len(tail)
+							streamedAnswerDeltas = true
+						}
+					} else {
+						if len(tail) > emittedLen {
+							delta := tail[emittedLen:]
+							emit(AgentEvent{Type: EventAnswerDelta, Text: delta, Step: state.Step})
+							emittedLen = len(tail)
+						}
+					}
+				}
+			}
+			content = fullContent.String()
+		} else {
+			// 非流式阶段：使用底层的 Chat 阻塞调用
+			resp, err := agent.provider.Chat(ctx, req)
+			if err != nil {
+				agent.finishError(ctx, state, emit, err.Error())
+				return
+			}
+			state.Usage.InputTokens += resp.InputTokens
+			state.Usage.OutputTokens += resp.OutputTokens
+			content = resp.Content
 		}
 
 		state.Step++
-		state.Usage.InputTokens += resp.InputTokens
-		state.Usage.OutputTokens += resp.OutputTokens
 		state.UpdatedAt = time.Now()
 
 		// --解析阶段
-		step, err := parseReact(resp.Content)
+		step, err := parseReact(content)
 		if err != nil {
 			healAttempts++
 			if healAttempts > agent.maxHealAttempts() {
 				agent.finishError(ctx, state, emit, err.Error())
 				return
 			}
-			if strings.TrimSpace(resp.Content) != "" {
-				state.Messages = append(state.Messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
+			if strings.TrimSpace(content) != "" {
+				state.Messages = append(state.Messages, llm.Message{Role: llm.RoleAssistant, Content: content})
 			}
 			state.Messages = append(state.Messages, llm.Message{Role: llm.RoleUser, Content: "Observation: 错误：" + err.Error()})
 			agent.checkpoint(ctx, state)
@@ -62,9 +108,12 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, emit func(AgentE
 		if step.FinalAnswer != "" {
 			state.Phase = PhaseDone
 			state.Answer = step.FinalAnswer
-			state.Messages = append(state.Messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
+			state.Messages = append(state.Messages, llm.Message{Role: llm.RoleAssistant, Content: content})
 			agent.checkpoint(ctx, state)
-			emit(AgentEvent{Type: EventAnswerDelta, Text: step.FinalAnswer, Step: state.Step})
+			// 如果是非流式模式，或者流式中未能提前检测到 Final Answer 前缀输出增量，在此处补发完整答案增量
+			if !streamedAnswerDeltas {
+				emit(AgentEvent{Type: EventAnswerDelta, Text: step.FinalAnswer, Step: state.Step})
+			}
 			emit(AgentEvent{Type: EventDone, Step: state.Step})
 			return
 		}
@@ -85,7 +134,7 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, emit func(AgentE
 		// 把这一轮（模型的思考 + 工具的观察）追加进历史，回到下一轮 Thinking
 		state.Messages = append(
 			state.Messages,
-			llm.Message{Role: llm.RoleAssistant, Content: resp.Content},
+			llm.Message{Role: llm.RoleAssistant, Content: content},
 			llm.Message{Role: llm.RoleUser, Content: "Observation: " + observation},
 		)
 		agent.checkpoint(ctx, state)

@@ -86,10 +86,11 @@ type ChatResponse struct {
 	ToolCalls    []ToolCall
 }
 
-// StreamChunk 表示流式输出过程中的单个文本增量块。
+// StreamChunk 表示流式输出过程中的单个增量块。
 type StreamChunk struct {
-	Content string // 本次增量文本
-	Err     error  // 出错时非空
+	Content   string     // 本次增量文本
+	ToolCalls []ToolCall // 工具调用列表（在流式中解析出完整工具调用时携带）
+	Err       error      // 出错时非空
 }
 
 // Provider 是各类大模型供应商（OpenAI, Claude 等）必须实现的统一适配接口。
