@@ -11,6 +11,7 @@ import (
 
 	"github.com/Kirby980/agent/agent"
 	"github.com/Kirby980/agent/builtin"
+	"github.com/Kirby980/agent/mcp"
 	"github.com/Kirby980/agent/patterns"
 	"github.com/Kirby980/agent/router"
 	"github.com/Kirby980/agent/tool"
@@ -72,8 +73,20 @@ func runOnce(ctx context.Context, cfg Config) error {
 		return err
 	}
 	box := builtin.NewDockerSandbox("")
+	client, err := mcp.NewStdioClient("./mcp/mcp-server")
+	defer client.Close()
+	// 2. 完成 MCP 协议握手
+	_, _ = client.Initialize(ctx)
+	_ = client.Initialized(ctx)
 
-	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}, fs.ReadFileTool(), box.CodeRunnerTool()), agent.WithStore(agent.NewFileStore("./store"), "test"))
+	// 3. 将 MCP Server 中的工具拉取并桥接成 []tool.Tool
+	mcpTools, err := mcp.BridgeAll(ctx, client)
+	if err != nil {
+		return err
+	}
+	mcpTools = append(mcpTools, fs.ReadFileTool(), box.CodeRunnerTool())
+
+	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(mcpTools...), agent.WithStore(agent.NewFileStore("./store"), "test"))
 
 	var name string
 	inputCh := make(chan string)

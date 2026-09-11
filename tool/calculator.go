@@ -41,7 +41,7 @@ func (c *Calculator) Call(ctx context.Context, args json.RawMessage) (string, er
 	}
 
 	// 为了演示，这里用一个极简的计算器（支持 + - * / 和数字）
-	result, err := calculateSimple(params.Expr)
+	result, err := CalculateSimple(params.Expr)
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +49,7 @@ func (c *Calculator) Call(ctx context.Context, args json.RawMessage) (string, er
 }
 
 // 极简计算器（实际项目建议用更成熟的方案，比如 go-calc 或自定义解析器）
-func calculateSimple(expr string) (float64, error) {
+func CalculateSimple(expr string) (float64, error) {
 	// 极简解析：支持单一二元运算 a+b, a-b, a*b, a/b，忽略空格。
 	// 生产代码请用成熟解析库，本函数只满足示例场景。
 	s := strings.ReplaceAll(expr, " ", "")
