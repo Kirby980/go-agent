@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Kirby980/agent/agent"
+	"github.com/Kirby980/agent/builtin"
 	"github.com/Kirby980/agent/patterns"
 	"github.com/Kirby980/agent/router"
 	"github.com/Kirby980/agent/tool"
@@ -65,8 +66,14 @@ func runOnce(ctx context.Context, cfg Config) error {
 
 	// 包装为单个 llm.Provider 注入 Agent
 	clusterProvider := r.AsProvider("multi-provider-cluster")
+	fs, err := builtin.NewFileSystem("./")
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	box := builtin.NewDockerSandbox("")
 
-	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}), agent.WithStore(agent.NewFileStore("./store"), "test"))
+	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(&tool.Calculator{}, &tool.Now{}, fs.ReadFileTool(), box.CodeRunnerTool()), agent.WithStore(agent.NewFileStore("./store"), "test"))
 
 	var name string
 	inputCh := make(chan string)
