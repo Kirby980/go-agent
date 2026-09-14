@@ -10,13 +10,15 @@ import (
 
 // bridgedTool 把一个 MCP 工具包装成 tool.Tool。
 type bridgedTool struct {
-	client *StdioClient
+	client Client
 	def    MCPTool
 	params json.RawMessage
 }
 
-func (t *bridgedTool) Name() string        { return t.def.Name }
-func (t *bridgedTool) Description() string { return t.def.Description }
+func (t *bridgedTool) Name() string { return t.def.Name }
+func (t *bridgedTool) Description() string {
+	return fmt.Sprintf("[MCP工具] %s", t.def.Description)
+}
 func (t *bridgedTool) Parameters() json.RawMessage {
 	return t.params
 }
@@ -33,7 +35,7 @@ func (t *bridgedTool) Call(ctx context.Context, args json.RawMessage) (string, e
 }
 
 // BridgeAll 列出某个 MCP Server 的全部工具，桥接成 []tool.Tool。
-func BridgeAll(ctx context.Context, client *StdioClient) ([]tool.Tool, error) {
+func BridgeAll(ctx context.Context, client Client) ([]tool.Tool, error) {
 	mcpTools, err := client.ListTools(ctx)
 	if err != nil {
 		return nil, err

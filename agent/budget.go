@@ -18,7 +18,7 @@ type Budget struct {
 func DefaultBudget() Budget {
 	return Budget{
 		MaxSteps:        10,
-		MaxTokens:       12000,
+		MaxTokens:       4096,
 		MaxSameAction:   3,
 		MaxHealAttempts: 3,
 	}
