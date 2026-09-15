@@ -17,8 +17,8 @@ type Budget struct {
 // DefaultBudget 给 Agent 一个安全默认值，CLI 可用参数覆盖其中部分字段。
 func DefaultBudget() Budget {
 	return Budget{
-		MaxSteps:        10,
-		MaxTokens:       4096,
+		MaxSteps:        100,
+		MaxTokens:       10240,
 		MaxSameAction:   3,
 		MaxHealAttempts: 3,
 	}

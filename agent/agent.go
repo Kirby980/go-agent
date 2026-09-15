@@ -27,6 +27,7 @@ type Agent struct {
 	store        Store          // 状态持久化存储（可选）
 	sessionID    string         // 会话 ID，配合 store 使用
 	memory       *State         // 进程内缓存的最新会话状态
+	approver     Approver       // 权限与安全审批器（可选）
 }
 
 // New 创建并初始化一个 Agent 实例。
@@ -74,6 +75,13 @@ func WithStore(store Store, sessionID string) Option {
 func WithMemory(memory *State) Option {
 	return func(a *Agent) {
 		a.memory = memory
+	}
+}
+
+// WithApprover 设置安全审批器（人机交互安全确认）
+func WithApprover(approver Approver) Option {
+	return func(agent *Agent) {
+		agent.approver = approver
 	}
 }
 

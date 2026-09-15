@@ -159,6 +159,15 @@ func (agent *Agent) callTool(ctx context.Context, name string, args json.RawMess
 	if !ok {
 		return fmt.Sprintf("错误：未知工具 %q，可用工具：%v", name, agent.tools.ToolDefs())
 	}
+	if agent.approver != nil {
+		allowed, err := agent.approver.Approve(ctx, name, string(args))
+		if err != nil {
+			return fmt.Sprintf("安全审批异常: %v", err)
+		}
+		if !allowed {
+			return fmt.Sprintf("操作已被用户拒绝: 用户在安全审批提示中拒绝执行工具 %q。请向用户说明该操作已被取消，并根据实际情况尝试其他替代方案。", name)
+		}
+	}
 	out, err := t.Call(ctx, args)
 	if err != nil {
 		return "错误：" + err.Error()

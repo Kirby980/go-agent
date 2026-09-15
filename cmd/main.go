@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -115,20 +116,24 @@ func runOnce(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	mcpTools = append(mcpTools, fs.ReadFileTool(), box.CodeRunnerTool())
+	bash := builtin.NewBash("./")
+	mcpTools = append(mcpTools, fs.ListDirTool(), fs.ReadFileTool(), bash.Tool(), box.CodeRunnerTool())
 	if len(skills) > 0 {
 		mcpTools = append(mcpTools, skill.NewSkillTool(skills))
 	}
-	// 3. 构造包含技能清单的 System Prompt
-	systemPrompt := "你是一个具备丰富技能库的 AI 命令行助手。"
+	// 3. 构造包含代码感知与技能清单的 System Prompt
+	systemPrompt := "你是一个具备代码探索与终端执行能力的 AI 命令行助手。当前工作目录是本项目的根目录。你可以通过 `bash`、`list_dir` 与 `read_file` 探索代码、执行命令和测试。"
 	if skillPrompt := skill.FormatSkillsPrompt(skills); skillPrompt != "" {
 		systemPrompt += "\n\n" + skillPrompt
 	}
 
+	approver := agent.NewConsoleApprover()
 	a := agent.New(clusterProvider, "grok-4.6", tool.NewRegistry(mcpTools...),
-		agent.WithStore(agent.NewFileStore("./store"), "test"), agent.WithSystemPrompt(systemPrompt))
+		agent.WithStore(agent.NewFileStore("./store"), "test"),
+		agent.WithSystemPrompt(systemPrompt),
+		agent.WithApprover(approver),
+	)
 
-	var name string
 	inputCh := make(chan string)
 	outputCh := make(chan string)
 	defer func() {
@@ -136,16 +141,19 @@ func runOnce(ctx context.Context, cfg Config) error {
 		close(inputCh)
 	}()
 	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
 		for {
 			_, ok := <-outputCh
 			if !ok {
 				break
 			}
 			fmt.Println("输入你的问题:")
-			fmt.Scan(&name)
-			inputCh <- name
+			if scanner.Scan() {
+				inputCh <- scanner.Text()
+			} else {
+				break
+			}
 		}
-
 	}()
 	outputCh <- ""
 	for {
