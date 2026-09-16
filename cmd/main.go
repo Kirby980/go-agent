@@ -14,6 +14,7 @@ import (
 	"github.com/Kirby980/agent/builtin"
 	"github.com/Kirby980/agent/mcp"
 	"github.com/Kirby980/agent/patterns"
+	"github.com/Kirby980/agent/rag"
 	"github.com/Kirby980/agent/router"
 	"github.com/Kirby980/agent/skill"
 	"github.com/Kirby980/agent/tool"
@@ -116,8 +117,21 @@ func runOnce(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// 1. 初始化知识库检索器
+	store, _ := rag.NewVectorStore(ctx, rag.StoreConfig{
+		Type:    rag.StoreTypeES,
+		ESHost:  "http://localhost:9200",
+		ESIndex: "kb_chunks",
+	})
+	embedder := rag.NewOpenAIEmbedder("http://localhost:4000/v1", "sk-yangzenghe-gemini", "text-embedding-004", 768)
+
+	kbRetriever := &rag.Retriever{
+		Store:    store,
+		Embedder: embedder,
+	}
+
 	bash := builtin.NewBash("./")
-	mcpTools = append(mcpTools, fs.ListDirTool(), fs.ReadFileTool(), bash.Tool(), box.CodeRunnerTool())
+	mcpTools = append(mcpTools, fs.ListDirTool(), fs.ReadFileTool(), bash.Tool(), box.CodeRunnerTool(), rag.SearchTool(kbRetriever))
 	if len(skills) > 0 {
 		mcpTools = append(mcpTools, skill.NewSkillTool(skills))
 	}
