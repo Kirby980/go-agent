@@ -30,14 +30,19 @@ type Config struct {
 	APIKey  string // 认证 API 密钥
 }
 
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
 type chatReq struct {
-	Model       string       `json:"model"`
-	Messages    []chatMsg    `json:"messages"`
-	Temperature *float64     `json:"temperature,omitempty"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
-	Stop        []string     `json:"stop,omitempty"` // 命中任一序列时模型停止生成
-	Tools       []openaiTool `json:"tools,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMsg      `json:"messages"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	Stop          []string       `json:"stop,omitempty"` // 命中任一序列时模型停止生成
+	Tools         []openaiTool   `json:"tools,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
 
 // New 创建并返回一个 OpenAI 兼容的 Provider 实例。
@@ -167,8 +172,12 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CachedTokens int `json:"cached_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -177,11 +186,16 @@ func (p *Provider) Chat(ctx context.Context, req llm.ChatRequest) (*llm.ChatResp
 	if len(out.Choices) == 0 {
 		return nil, fmt.Errorf("%s: 空响应", p.name)
 	}
+	cached := out.Usage.CachedTokens
+	if out.Usage.PromptTokensDetails.CachedTokens > 0 {
+		cached = out.Usage.PromptTokensDetails.CachedTokens
+	}
 	msg := out.Choices[0].Message
 	return &llm.ChatResponse{
 		Content:      msg.Content,
 		InputTokens:  out.Usage.PromptTokens,
 		OutputTokens: out.Usage.CompletionTokens,
+		CachedTokens: cached,
 		ToolCalls:    parseToolCalls(msg.ToolCalls),
 	}, nil
 }
@@ -207,13 +221,14 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 		return nil, err
 	}
 	payload := chatReq{
-		Model:       req.Model,
-		Messages:    toOpenAIMessages(req.Messages),
-		Tools:       toOpenAITools(req.Tools),
-		Stream:      true,
-		Stop:        req.Stop,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Model:         req.Model,
+		Messages:      toOpenAIMessages(req.Messages),
+		Tools:         toOpenAITools(req.Tools),
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		Stop:          req.Stop,
+		Temperature:   req.Temperature,
+		MaxTokens:     req.MaxTokens,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -278,6 +293,13 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 				}
 				ptc.args.WriteString(tc.Function.Arguments)
 			}
+			if ev.Usage != nil {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case out <- llm.StreamChunk{Usage: ev.Usage}:
+				}
+			}
 			if ev.Content == "" {
 				return nil
 			}
@@ -335,6 +357,7 @@ type streamToolCallChunk struct {
 type openAIStreamEvent struct {
 	Content   string
 	ToolCalls []streamToolCallChunk
+	Usage     *llm.Usage
 }
 
 func (p *Provider) parseOpenAIStreamEvent(data []byte) (event openAIStreamEvent, done bool, err error) {
@@ -348,6 +371,15 @@ func (p *Provider) parseOpenAIStreamEvent(data []byte) (event openAIStreamEvent,
 				ToolCalls []streamToolCallChunk `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
 			Type    string `json:"type"`
@@ -364,12 +396,25 @@ func (p *Provider) parseOpenAIStreamEvent(data []byte) (event openAIStreamEvent,
 		}
 		return openAIStreamEvent{}, false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, kind, chunk.Error.Message)
 	}
+	var u *llm.Usage
+	if chunk.Usage != nil {
+		cached := chunk.Usage.CachedTokens
+		if chunk.Usage.PromptTokensDetails != nil && chunk.Usage.PromptTokensDetails.CachedTokens > 0 {
+			cached = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		u = &llm.Usage{
+			InputTokens:  chunk.Usage.PromptTokens,
+			OutputTokens: chunk.Usage.CompletionTokens,
+			CachedTokens: cached,
+		}
+	}
 	if len(chunk.Choices) == 0 {
-		return openAIStreamEvent{}, false, nil
+		return openAIStreamEvent{Usage: u}, false, nil
 	}
 	return openAIStreamEvent{
 		Content:   chunk.Choices[0].Delta.Content,
 		ToolCalls: chunk.Choices[0].Delta.ToolCalls,
+		Usage:     u,
 	}, false, nil
 }
 

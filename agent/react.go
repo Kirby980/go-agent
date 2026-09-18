@@ -43,11 +43,15 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 
 			var fullContent strings.Builder
 			var emittedLen int
+			var lastUsage *llm.Usage
 
 			for chunk := range streamCh {
 				if chunk.Err != nil {
 					agent.finishError(ctx, state, emit, chunk.Err.Error())
 					return
+				}
+				if chunk.Usage != nil {
+					lastUsage = chunk.Usage
 				}
 				fullContent.WriteString(chunk.Content)
 				curr := fullContent.String()
@@ -71,6 +75,12 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 					}
 				}
 			}
+			if lastUsage != nil {
+				state.Usage.InputTokens += lastUsage.InputTokens
+				state.Usage.OutputTokens += lastUsage.OutputTokens
+				state.Usage.CachedTokens += lastUsage.CachedTokens
+				emit(AgentEvent{Type: EventUsage, Usage: lastUsage, Step: state.Step})
+			}
 			content = fullContent.String()
 		} else {
 			// 非流式阶段：使用底层的 Chat 阻塞调用
@@ -79,8 +89,15 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 				agent.finishError(ctx, state, emit, err.Error())
 				return
 			}
-			state.Usage.InputTokens += resp.InputTokens
-			state.Usage.OutputTokens += resp.OutputTokens
+			u := &llm.Usage{
+				InputTokens:  resp.InputTokens,
+				OutputTokens: resp.OutputTokens,
+				CachedTokens: resp.CachedTokens,
+			}
+			state.Usage.InputTokens += u.InputTokens
+			state.Usage.OutputTokens += u.OutputTokens
+			state.Usage.CachedTokens += u.CachedTokens
+			emit(AgentEvent{Type: EventUsage, Usage: u, Step: state.Step})
 			content = resp.Content
 		}
 
@@ -114,7 +131,7 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 			if !streamedAnswerDeltas {
 				emit(AgentEvent{Type: EventAnswerDelta, Text: step.FinalAnswer, Step: state.Step})
 			}
-			emit(AgentEvent{Type: EventDone, Step: state.Step})
+			emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
 			return
 		}
 
@@ -149,7 +166,7 @@ func (agent *Agent) finishError(ctx context.Context, state *State, emit func(Age
 	state.UpdatedAt = time.Now()
 	agent.checkpoint(ctx, state)
 	emit(AgentEvent{Type: EventError, Text: msg, Step: state.Step})
-	emit(AgentEvent{Type: EventDone, Step: state.Step})
+	emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
 }
 
 // callTool 执行工具，返回喂回模型的观察文本。

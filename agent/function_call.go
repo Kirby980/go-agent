@@ -47,10 +47,14 @@ func (agent *Agent) runFunctionCalling(
 
 			var fullContent strings.Builder
 
+			var lastUsage *llm.Usage
 			for chunk := range streamCh {
 				if chunk.Err != nil {
 					agent.finishError(ctx, state, emit, chunk.Err.Error())
 					return
+				}
+				if chunk.Usage != nil {
+					lastUsage = chunk.Usage
 				}
 				if chunk.Content != "" {
 					fullContent.WriteString(chunk.Content)
@@ -63,6 +67,12 @@ func (agent *Agent) runFunctionCalling(
 					toolCalls = append(toolCalls, chunk.ToolCalls...)
 				}
 			}
+			if lastUsage != nil {
+				state.Usage.InputTokens += lastUsage.InputTokens
+				state.Usage.OutputTokens += lastUsage.OutputTokens
+				state.Usage.CachedTokens += lastUsage.CachedTokens
+				emit(AgentEvent{Type: EventUsage, Usage: lastUsage, Step: state.Step})
+			}
 			content = fullContent.String()
 		} else {
 			resp, err := agent.provider.Chat(ctx, req)
@@ -70,8 +80,15 @@ func (agent *Agent) runFunctionCalling(
 				agent.finishError(ctx, state, emit, err.Error())
 				return
 			}
-			state.Usage.InputTokens += resp.InputTokens
-			state.Usage.OutputTokens += resp.OutputTokens
+			u := &llm.Usage{
+				InputTokens:  resp.InputTokens,
+				OutputTokens: resp.OutputTokens,
+				CachedTokens: resp.CachedTokens,
+			}
+			state.Usage.InputTokens += u.InputTokens
+			state.Usage.OutputTokens += u.OutputTokens
+			state.Usage.CachedTokens += u.CachedTokens
+			emit(AgentEvent{Type: EventUsage, Usage: u, Step: state.Step})
 			content = resp.Content
 			toolCalls = resp.ToolCalls
 		}
@@ -115,7 +132,7 @@ func (agent *Agent) runFunctionCalling(
 			if !streamedAnswerDeltas {
 				emit(AgentEvent{Type: EventAnswerDelta, Text: answer, Step: state.Step})
 			}
-			emit(AgentEvent{Type: EventDone, Step: state.Step})
+			emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
 			return
 		}
 

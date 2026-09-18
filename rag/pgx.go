@@ -69,3 +69,28 @@ func (s *PgVectorStore) Search(ctx context.Context, queryEmb []float32, k int) (
 	}
 	return docs, rows.Err()
 }
+
+// SearchKeyword 基于 PostgreSQL 的 to_tsvector / plainto_tsquery 全文检索
+func (s *PgVectorStore) SearchKeyword(ctx context.Context, query string, k int) ([]Document, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, doc_id, content, ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $1)) AS score
+		 FROM kb_chunks
+		 WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', $1)
+		 ORDER BY score DESC
+		 LIMIT $2`,
+		query, k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var docs []Document
+	for rows.Next() {
+		var d Document
+		if err := rows.Scan(&d.ID, &d.DocID, &d.Content, &d.Score); err != nil {
+			return nil, err
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}

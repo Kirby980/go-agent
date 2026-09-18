@@ -117,8 +117,10 @@ func (p *Provider) adaptRequest(req llm.ChatRequest) (map[string]any, error) {
 
 func (p *Provider) adaptResponse(body io.ReadCloser) (*llm.ChatResponse, error) {
 	type UsageInfo struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	}
 	type ClaudeResponse struct {
 		ID           string         `json:"id"`
@@ -135,8 +137,9 @@ func (p *Provider) adaptResponse(body io.ReadCloser) (*llm.ChatResponse, error) 
 		return nil, err
 	}
 	resp := &llm.ChatResponse{}
-	resp.InputTokens = out.Usage.InputTokens
+	resp.InputTokens = out.Usage.InputTokens + out.Usage.CacheReadInputTokens + out.Usage.CacheCreationInputTokens
 	resp.OutputTokens = out.Usage.OutputTokens
+	resp.CachedTokens = out.Usage.CacheReadInputTokens
 	text, toolCalls := parseAnthropicResponse(out.Content)
 	resp.Content = text
 	resp.ToolCalls = toolCalls
@@ -291,6 +294,12 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 		toolCallsMap := make(map[int]*partialToolCall)
 		maxIndex := -1
 
+		var (
+			totalInputTokens  int
+			totalOutputTokens int
+			cachedTokens      int
+		)
+
 		streamErr := transport.ParseSSE(resp.Body, func(data []byte) error {
 			ev, done, err := p.parseClaudeStreamEvent(data)
 			if err != nil {
@@ -298,6 +307,27 @@ func (p *Provider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan 
 			}
 			if done {
 				return errStreamDone
+			}
+			if ev.HasUsage {
+				if ev.InputTokens > 0 {
+					totalInputTokens = ev.InputTokens
+				}
+				if ev.CachedTokens > 0 {
+					cachedTokens = ev.CachedTokens
+				}
+				if ev.OutputTokens > 0 {
+					totalOutputTokens = ev.OutputTokens
+				}
+				currentUsage := &llm.Usage{
+					InputTokens:  totalInputTokens,
+					OutputTokens: totalOutputTokens,
+					CachedTokens: cachedTokens,
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case out <- llm.StreamChunk{Usage: currentUsage}:
+				}
 			}
 			switch ev.Type {
 			case "text":
@@ -374,12 +404,24 @@ type claudeStreamEvent struct {
 	ToolCallID   string
 	ToolCallName string
 	PartialJSON  string
+	InputTokens  int
+	OutputTokens int
+	CachedTokens int
+	HasUsage     bool
 }
 
 func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, done bool, err error) {
 	var raw struct {
 		Type         string `json:"type"`
 		Index        int    `json:"index"`
+		Message      *struct {
+			Usage *struct {
+				InputTokens              int `json:"input_tokens"`
+				OutputTokens             int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
 		ContentBlock *struct {
 			Type string `json:"type"`
 			ID   string `json:"id"`
@@ -390,6 +432,12 @@ func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, do
 			Text        string `json:"text"`
 			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
+		Usage *struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
 		Error *struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
@@ -404,8 +452,30 @@ func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, do
 			return claudeStreamEvent{}, false, fmt.Errorf("%s: 流内错误 %s: %s", p.name, raw.Error.Type, raw.Error.Message)
 		}
 		return claudeStreamEvent{}, false, fmt.Errorf("%s: 流内错误 (原文 %.200q)", p.name, data)
+	case "message_start":
+		ev := claudeStreamEvent{Type: "message_start"}
+		if raw.Message != nil && raw.Message.Usage != nil {
+			u := raw.Message.Usage
+			ev.InputTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+			ev.CachedTokens = u.CacheReadInputTokens
+			ev.OutputTokens = u.OutputTokens
+			ev.HasUsage = true
+		}
+		return ev, false, nil
+	case "message_delta":
+		ev := claudeStreamEvent{Type: "message_delta"}
+		if raw.Usage != nil {
+			u := raw.Usage
+			ev.OutputTokens = u.OutputTokens
+			if u.InputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
+				ev.InputTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+				ev.CachedTokens = u.CacheReadInputTokens
+			}
+			ev.HasUsage = true
+		}
+		return ev, false, nil
 	case "message_stop":
-		return claudeStreamEvent{}, true, nil
+		return claudeStreamEvent{Type: "message_stop"}, true, nil
 	case "content_block_start":
 		if raw.ContentBlock != nil && raw.ContentBlock.Type == "tool_use" {
 			return claudeStreamEvent{
@@ -415,7 +485,7 @@ func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, do
 				ToolCallName: raw.ContentBlock.Name,
 			}, false, nil
 		}
-		return claudeStreamEvent{}, false, nil
+		return claudeStreamEvent{Type: "content_block_start"}, false, nil
 	case "content_block_delta":
 		if raw.Delta != nil {
 			if raw.Delta.Type == "text_delta" {
@@ -432,9 +502,9 @@ func (p *Provider) parseClaudeStreamEvent(data []byte) (ev claudeStreamEvent, do
 				}, false, nil
 			}
 		}
-		return claudeStreamEvent{}, false, nil
+		return claudeStreamEvent{Type: "content_block_delta"}, false, nil
 	default:
-		return claudeStreamEvent{}, false, nil
+		return claudeStreamEvent{Type: raw.Type}, false, nil
 	}
 }
 

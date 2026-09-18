@@ -83,6 +83,7 @@ type ChatResponse struct {
 	Content      string
 	InputTokens  int
 	OutputTokens int
+	CachedTokens int
 	ToolCalls    []ToolCall
 }
 
@@ -90,6 +91,7 @@ type ChatResponse struct {
 type StreamChunk struct {
 	Content   string     // 本次增量文本
 	ToolCalls []ToolCall // 工具调用列表（在流式中解析出完整工具调用时携带）
+	Usage     *Usage     // 本轮调用收到的 Token 用量与缓存统计（如果有）
 	Err       error      // 出错时非空
 }
 

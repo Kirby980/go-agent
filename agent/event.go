@@ -1,5 +1,7 @@
 package agent
 
+import "github.com/Kirby980/agent/llm"
+
 // EventType 表示 Agent 在执行生命周期中产生的事件类型。
 type EventType string
 
@@ -14,15 +16,18 @@ const (
 	EventAnswerDelta EventType = "answer_delta"
 	// EventError 表示执行过程中发生了不可恢复的错误。
 	EventError EventType = "error"
+	// EventUsage 表示单步推理的 Token 消耗量与缓存命中详情。
+	EventUsage EventType = "usage"
 	// EventDone 表示当前任务执行结束（无论是成功还是失败终态）。
 	EventDone EventType = "done"
 )
 
 // AgentEvent 是 Agent 运行过程中向外发出的一个事件。
 type AgentEvent struct {
-	Type EventType `json:"type"`
-	Text string    `json:"text,omitempty"` // 思考内容 / 答案增量 / 错误信息
-	Tool string    `json:"tool,omitempty"` // 涉及的工具名
-	Args string    `json:"args,omitempty"` // 工具参数
-	Step int       `json:"step,omitempty"` // 当前 Agent 步数
+	Type  EventType  `json:"type"`
+	Text  string     `json:"text,omitempty"`  // 思考内容 / 答案增量 / 错误信息
+	Tool  string     `json:"tool,omitempty"`  // 涉及的工具名
+	Args  string     `json:"args,omitempty"`  // 工具参数
+	Step  int        `json:"step,omitempty"`  // 当前 Agent 步数
+	Usage *llm.Usage `json:"usage,omitempty"` // 本轮或累计 Token 消耗及缓存命中详情
 }

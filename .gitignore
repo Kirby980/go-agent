@@ -1,3 +1,5 @@
 cmd/store/test.json
 store/test.json
 skills/commit-helper/SKILL.md
+agent.yaml
+store/default.json

@@ -85,3 +85,55 @@ func (fs *FileSystem) ListDirTool() tool.Tool {
 			return strings.Join(result, "\n"), nil
 		})
 }
+
+type writeFileArgs struct {
+	Path    string `json:"path" desc:"相对于项目根目录的文件路径"`
+	Content string `json:"content" desc:"要写入的文件全部内容"`
+}
+
+func (fs *FileSystem) WriteFileTool() tool.Tool {
+	return tool.NewTypedTool("write_file", "在项目指定路径创建或覆写文件",
+		func(ctx context.Context, a writeFileArgs) (string, error) {
+			path, err := fs.safePath(a.Path)
+			if err != nil {
+				return "", err
+			}
+			dir := filepath.Dir(path)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return "", fmt.Errorf("创建目录失败: %w", err)
+			}
+			if err := os.WriteFile(path, []byte(a.Content), 0644); err != nil {
+				return "", fmt.Errorf("写入文件失败: %w", err)
+			}
+			return fmt.Sprintf("文件 %s 写入成功 (%d 字节)", a.Path, len(a.Content)), nil
+		})
+}
+
+type replaceContentArgs struct {
+	Path       string `json:"path" desc:"目标文件路径"`
+	OldContent string `json:"old_content" desc:"需要被替换的精确原文本内容"`
+	NewContent string `json:"new_content" desc:"替换后的新文本内容"`
+}
+
+func (fs *FileSystem) ReplaceContentTool() tool.Tool {
+	return tool.NewTypedTool("replace_content", "精确替换文件中的某一段文本内容",
+		func(ctx context.Context, a replaceContentArgs) (string, error) {
+			path, err := fs.safePath(a.Path)
+			if err != nil {
+				return "", err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return "", fmt.Errorf("读取文件失败: %w", err)
+			}
+			content := string(data)
+			if !strings.Contains(content, a.OldContent) {
+				return "", fmt.Errorf("文件中未找到要替换的目标原内容，请先通过 read_file 确认精确代码")
+			}
+			newFull := strings.Replace(content, a.OldContent, a.NewContent, 1)
+			if err := os.WriteFile(path, []byte(newFull), 0644); err != nil {
+				return "", fmt.Errorf("保存替换内容失败: %w", err)
+			}
+			return fmt.Sprintf("成功在 %s 中替换指定内容", a.Path), nil
+		})
+}

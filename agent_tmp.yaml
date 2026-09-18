@@ -1,0 +1,21 @@
+# Go-Agent 本地项目配置文件 (Codex / AGY 风格)
+# 修改保存后，重新启动 agent 即可直接生效，无需手动配置环境变量。
+
+# 大语言模型配置
+model:               # 默认使用的模型名称 (如 gemini-2.5-pro, gemini-2.5-flash)
+base_url:   # API 基础地址 (本地 LiteLLM 网关或远程 OpenAI 兼容端点)
+api_key:        # API 访问密钥
+supplier: "openai"                     # 供应商协议类型: openai 或 claude
+name: "vertex-gateway"                 # Provider 展示名称
+
+# 知识库 (RAG) 检索配置
+rag:
+  enabled: true                        # 是否挂载企业知识库检索工具
+  store_type: "pg"
+  pg_conn: "postgres://agent:agent_password@localhost:5432/agent_kb?sslmode=disable"
+  es_host: "http://localhost:9200"     # Elasticsearch 服务端地址
+  es_index: "kb_chunks"                # 检索目标索引名
+  embedding_url: 
+  embedding_key: 
+  embedding_model: 
+  embedding_dim:

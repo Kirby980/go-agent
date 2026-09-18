@@ -223,3 +223,101 @@ func TestAdaptResponseToolCalls(t *testing.T) {
 		t.Errorf("tool_calls 错误: %+v", resp.ToolCalls)
 	}
 }
+
+func TestAdaptResponseCacheTokens(t *testing.T) {
+	p := New(Config{Name: "claude"})
+	mockJSON := `{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-3-5-sonnet",
+		"content": [
+			{"type": "text", "text": "你好"}
+		],
+		"stop_reason": "end_turn",
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"cache_creation_input_tokens": 200,
+			"cache_read_input_tokens": 700
+		}
+	}`
+
+	resp, err := p.adaptResponse(io.NopCloser(strings.NewReader(mockJSON)))
+	if err != nil {
+		t.Fatalf("adaptResponse 失败: %v", err)
+	}
+
+	// 100 (uncached) + 200 (creation) + 700 (read) = 1000 total input tokens
+	if resp.InputTokens != 1000 {
+		t.Errorf("InputTokens = %d, want 1000", resp.InputTokens)
+	}
+	if resp.CachedTokens != 700 {
+		t.Errorf("CachedTokens = %d, want 700", resp.CachedTokens)
+	}
+	if resp.OutputTokens != 50 {
+		t.Errorf("OutputTokens = %d, want 50", resp.OutputTokens)
+	}
+
+	u := llm.Usage{
+		InputTokens:  resp.InputTokens,
+		OutputTokens: resp.OutputTokens,
+		CachedTokens: resp.CachedTokens,
+	}
+	if hitRate := u.CacheHitRate(); hitRate != 70.0 {
+		t.Errorf("CacheHitRate = %f, want 70.0", hitRate)
+	}
+}
+
+func TestChatStreamUsageAndCacheTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":1,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":400}}}\n\n")
+		io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"测试\"}}\n\n")
+		io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":25}}\n\n")
+		io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	p := New(Config{Name: "claude", BaseURL: srv.URL})
+	ch, err := p.ChatStream(context.Background(), llm.ChatRequest{
+		Model:    "claude-3-5-sonnet",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var lastUsage *llm.Usage
+	var text strings.Builder
+	for chunk := range ch {
+		if chunk.Err != nil {
+			t.Fatalf("意外错误: %v", chunk.Err)
+		}
+		if chunk.Usage != nil {
+			lastUsage = chunk.Usage
+		}
+		text.WriteString(chunk.Content)
+	}
+
+	if text.String() != "测试" {
+		t.Errorf("got text %q, want '测试'", text.String())
+	}
+	if lastUsage == nil {
+		t.Fatal("未收到 Usage")
+	}
+	// 50 + 50 + 400 = 500 input tokens
+	if lastUsage.InputTokens != 500 {
+		t.Errorf("InputTokens = %d, want 500", lastUsage.InputTokens)
+	}
+	if lastUsage.CachedTokens != 400 {
+		t.Errorf("CachedTokens = %d, want 400", lastUsage.CachedTokens)
+	}
+	if lastUsage.OutputTokens != 25 {
+		t.Errorf("OutputTokens = %d, want 25", lastUsage.OutputTokens)
+	}
+	if rate := lastUsage.CacheHitRate(); rate != 80.0 {
+		t.Errorf("CacheHitRate = %f, want 80.0", rate)
+	}
+}
+

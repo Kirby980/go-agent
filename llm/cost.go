@@ -8,10 +8,28 @@ type Pricing struct {
 	OutputPer1M float64 // 每百万输出 Token 费用
 }
 
-// Usage 记录模型调用的 Token 消耗量。
+// Usage 记录模型调用的 Token 消耗量及缓存命中详情。
 type Usage struct {
 	InputTokens  int `json:"input_tokens"`  // 输入 Prompt Token 数量
 	OutputTokens int `json:"output_tokens"` // 输出 Completion Token 数量
+	CachedTokens int `json:"cached_tokens"` // 命中的 Prompt 缓存 Token 数量
+}
+
+// Total 返回总消耗的 Token 数量
+func (u Usage) Total() int {
+	return u.InputTokens + u.OutputTokens
+}
+
+// CacheHitRate 返回缓存命中率百分比（0.0 ~ 100.0%）
+func (u Usage) CacheHitRate() float64 {
+	if u.InputTokens == 0 {
+		return 0
+	}
+	rate := float64(u.CachedTokens) / float64(u.InputTokens) * 100
+	if rate > 100 {
+		return 100
+	}
+	return rate
 }
 
 // Cost 根据指定的价格计费标准计算当前用量的实际花费金额。
@@ -33,5 +51,6 @@ func (a *Accumulator) Add(u Usage, p Pricing) {
 	defer a.mu.Unlock()
 	a.Usage.InputTokens += u.InputTokens
 	a.Usage.OutputTokens += u.OutputTokens
+	a.Usage.CachedTokens += u.CachedTokens
 	a.Cost += u.Cost(p)
 }
