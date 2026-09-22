@@ -1,40 +1,54 @@
 # Go AI Agent Framework
 
-一个用 Go 语言编写的高性能、生产级 AI Agent 核心框架。支持原生的 **Function Calling** 与经典 **ReAct（Reasoning + Acting）** 自愈模式、企业级 **双路混合 RAG（基于自研 go-es 驱动）**、**本地代码库自主阅读与终端工具（内置 Human-in-the-Loop 安全拦截）**、多模型统一抽象与路由容灾、DAG 任务规划并行调度，以及 Model Context Protocol (MCP) 与 Agent Skills 扩展协议。
+一个用 Go 语言编写的高性能、生产级 AI Agent 核心框架。具备类似 **Claude Code / AGY** 的终端交互体验，支持原生的 **Function Calling** 与经典 **ReAct（Reasoning + Acting）** 自愈模式、**多智能体分治协同（Subagent 委派 + Supervisor 团队流水线）**、企业级 **双路混合 RAG（基于自研 go-es 驱动）**、**本地代码库自主阅读与终端工具（内置 Human-in-the-Loop 安全拦截）**、多模型统一抽象与路由容灾、DAG 任务规划并行调度，以及 Model Context Protocol (MCP) 与 Agent Skills 扩展协议。
 
 ---
 
 ## 🌟 核心特性
 
-- **双模式推理引擎**：
-  - **Function Calling 模式**：原生利用大模型结构化 Tool Calling 能力，自动回填 `RoleTool` 结果与 `ToolCallID`。
-  - **ReAct 模式**：面向不支持工具调用的模型，动态注入工具 Schema，基于 `Thought -> Action -> Observation` 文本协议运行，并内置格式解析失败自愈重试机制。
-- **企业级双路混合检索 RAG（默认基于 `Kirby980/go-es`）**：
-  - **通用 VectorStore 抽象**：面向接口解耦，支持工厂配置灵活切换（默认 ES，保留 PostgreSQL / pgvector）。
-  - **自研 ES 客户端深度集成**：接入 [`github.com/Kirby980/go-es`](https://github.com/Kirby980/go-es)，利用 `BulkBuilder` 零反射流式批量写入切片文本与稠密向量，通过 `SearchBuilder.KNN` 运行原生 ES 8.x/9.x 向量检索。
-  - **双路召回 + RRF 融合**：KNN 语义向量检索 + BM25 关键词倒排检索无缝融合，使用 RRF（倒数排名融合）算法智能排序，并支持二次精排（Reranker）。
-  - **知识库工具化 (`rag.SearchTool`)**：一键将企业文档检索管线挂载为 Agent 工具。
-- **本地代码库感知与终端执行 (Claude Code / Codex 风格)**：
-  - **代码库阅读与定位**：内置 `read_file`、`list_dir`，大模型像真实程序员一样自主探索仓库结构、阅读上下文。
-  - **终端命令执行 (`bash_tool`)**：支持执行 shell 命令，内置 30 秒超时控制与 30KB 输出防爆截断保护。
-  - **人类在环安全审计 (Human-in-the-Loop Approver)**：精准识别只读安全命令（`ls`, `pwd`, `git status` 等自动白名单放行）与破坏性命令（`rm`, `mv`, `sudo`, 重定向写入 `>` 等触发终端交互式 `[y/a/n]` 确认）。
-- **扩展生态与协议互联**：
-  - **Agent Skills**：遵循标准 `SKILL.md` 规范，实现技能元数据自动扫描发现与指令增强。
-  - **MCP 协议支持**：支持 Model Context Protocol (MCP)，一键挂载外部标准工具与远程服务。
-- **安全与预算控制 (Budget Guard)**：
-  - 支持最大步数 (`MaxSteps`)、累计 Token 上限 (`MaxTokens`)、截止时间 (`Deadline`) 控制。
-  - 自动基于动作签名（工具名 + 参数哈希）检测死循环，防范重复动作（`MaxSameAction`）。
-- **DAG 任务规划与拓扑并行执行 (DAG Planner)**：
-  - 支持依赖图拓扑分层（`Levels`），检测循环依赖。
-  - 同层任务并发调用，层间依赖同步等待；支持单点故障快速熔断取消（`context.WithCancel`）。
-- **统一模型抽象与智能路由 (LLM & Router)**：
-  - 统一的 `Provider` 接口，内置 OpenAI、Claude、DeepSeek、豆包等模型适配器。
-  - 支持多 Provider 优先级路由（`Priority`）与公平轮询（`RoundRobin`）负载均衡，具备自动故障降级容灾能力。
-- **跨平台环境凭据自动识别 (Detector)**：
-  - 基于 `runtime.GOOS` 跨系统（macOS / Windows / Linux）自动识别环境变量与本地客户端配置（如 Claude Desktop、本地离线模型 Ollama 等），零配置开箱即用。
-- **工业级传输层 (Transport)**：
-  - 具备令牌桶限流 (`Limiter`)。
-  - 支持带抖动的指数退避重试 (`Exponential Backoff with Jitter`)，优先尊重服务端的 `Retry-After` 响应头。
+### 1. 终端交互与行编辑器 (对标 Claude Code / AGY)
+- **实时行内建议菜单**：在空行键入 `/` 的瞬间，光标下方即时展开可用斜杠指令列表，无需等待回车。
+- **固定视口与平滑滚动**：下拉框大小恒定为 6 行，支持 `↑` / `↓` 移动绿色高亮光标 `❯`；到达底部或顶部时稳固停驻（不无限循环），超出视口时内容平滑滚动。
+- **字符实时过滤与回退**：输入 `/m` 建议框自动过滤只保留 `/model`；按 Backspace 删掉 `/` 建议框立即隐去，恢复普通文本输入。
+- **本地 Shell 命令直通 (`!<cmd>`)**：输入 `!git status`、`!go test ./...`、`!ls -la` 直接在本地宿主机 Shell 执行，保留原生彩色输出与终端交互。
+- **文件绝对路径智能消歧**：输入 `/home/...` 或任何带多级目录 `/` 的路径时，编辑器自动判定为提问内容而非指令，不会误拦截，Agent 可正常阅读文件。
+- **全套快捷键支持**：支持历史记录漫游（`↑` / `↓`）、`Ctrl+A` / `Ctrl+E` / `Ctrl+K` / `Ctrl+U`、`Ctrl+C` 取消当前行、`Ctrl+D` 退出。
+
+### 2. 多智能体体系 (Multi-Agent Systems)
+- **层次化 Subagent 委派模式 (日常默认)**：
+  - 主 Agent 作为面向用户的交互中枢，挂载 `delegate_subagent` 工具；
+  - 遇到耗时、长链路或复杂任务时，自主召唤拥有**物理隔离全新上下文**的专职子智能体（如 `researcher` 探索代码、`coder` 精准重构、`reviewer` 审查测试）；
+  - 子智能体的大量中间工具调用和试错日志完全隔离，执行完毕后只向主 Agent 回传精炼结论，**彻底解决主上下文爆炸与注意力稀释**；
+  - 终端以带颜色标签实时流式呈现 Subagent 的工作细节（`[researcher 思考]`、`[researcher 工具]`）。
+- **Supervisor-Worker 团队多智能体 (`/team`)**：
+  - 输入 `/team <任务>` 调起自动化多智能体协同流水线；
+  - 由中央大脑 **Supervisor（主管）** 动态审视阶段性进展，自主在 `researcher`、`coder`、`reviewer` 之间动态派活推进，直到全案达成 `FINISH` 交付。
+- **多样化多智能体编排范式 (`mas/` 包)**：
+  - **Supervisor**：中心化主管督导与任务指派；
+  - **Isolated Orchestrator**：强隔离分治编排 + Sectioning 并发调度；
+  - **Swarm**：基于接力转交（Handoff）的去中心化多智能体协作（OpenAI Swarm 理念）；
+  - **Pipeline**：顺序流水线链式推进；
+  - **Multi-Agent Debate**：多智能体交叉辩论与多数表决达成共识；
+  - **GroupChat**：基于消息总线（MessageBus）广播的圆桌讨论组。
+
+### 3. 推理引擎与上下文缓存 (Prompt Caching)
+- **原生 Function Calling 与 ReAct 双模式**：支持大模型结构化 Tool Calling 能力；面向纯文本模型自动降级为 ReAct（Thought-Action-Observation），内置格式解析失败自愈重试。
+- **Anthropic Claude Prompt Caching 深度集成**：
+  - 精确计算 billable prompt tokens（`input_tokens + cache_read + cache_creation`）；
+  - 在非流式与流式输出中均实时统计 `CachedTokens` 与命中率，通过 `/stats` 查看会话节省情况。
+
+### 4. 企业级双路混合检索 RAG (默认基于 `Kirby980/go-es`)
+- **通用 VectorStore 抽象**：面向接口解耦，工厂配置支持 Elasticsearch 8.x/9.x 与 PostgreSQL (pgvector)。
+- **自研 ES 客户端深度集成**：接入 [`github.com/Kirby980/go-es`](https://github.com/Kirby980/go-es)，利用 `BulkBuilder` 零反射批量入库，`SearchBuilder.KNN` 运行原生向量检索。
+- **双路召回 + RRF 融合**：KNN 语义向量检索 + BM25 倒排关键词检索，使用 RRF（倒数排名融合）算法智能排序，并支持二次精排（Reranker）。
+
+### 5. 本地代码感知与 Human-in-the-Loop 安全卫士
+- **代码库阅读与定位**：内置 `read_file`、`list_dir`、`write_file`、`replace_content`，大模型自主探索并重构代码。
+- **终端执行与安全审批 (Approver)**：安全命令自动放行；破坏性命令（`rm`, `mv`, `sudo`, 重定向 `>`）触发终端交互式 `[y/a/n]` 人类确认。
+
+### 6. DAG 任务规划与拓扑并行执行 (`plan/`)
+- 基于 Kahn 算法进行依赖图拓扑分层（`Levels`），严格检测循环依赖。
+- 同层任务并发调度，层间依赖同步等待；支持单点故障快速熔断取消（`context.WithCancel`）。
 
 ---
 
@@ -43,46 +57,40 @@
 ```text
 ┌────────────────────────────────────────────────────────┐
 │                        cmd/                            │
-│         CLI 交互入口、工具注册与安全拦截装配 (main.go)      │
+│    CLI 入口 (main.go)、实时行编辑器 (editor.go)        │
+│    Subagent 工具装配、/team 团队模式调度、!shell 直通    │
 └──────────────────────────┬─────────────────────────────┘
                            ▼
 ┌────────────────────────────────────────────────────────┐
 │                       agent/                           │
-│   Agent 核心调度器 (RunStream, ReAct, Function Calling)   │
-│   人类在环命令审批 (Approver)、预算控制 (Budget)、存储 (Store)│
+│   Agent 核心调度引擎 (RunStream, ReAct, FunctionCall)    │
+│   人类在环审批 (Approver)、预算控制 (Budget)、存储 (Store)│
 └──────────┬───────────────────┬─────────────────────────┘
            │                   │
            ▼                   ▼
 ┌──────────────────────┐ ┌──────────────────────────────────────┐
-│        plan/         │ │                tool/                 │
-│  DAG 拓扑分层与并行执行 │ │         工具注册表与 Schema 转换       │
-└──────────────────────┘ └──────────┬──────────────┬────────────┘
-                                    │              │
-           ┌────────────────────────┘              └────────────────────────┐
-           ▼                                                                ▼
-┌──────────────────────────────────────┐        ┌──────────────────────────────────────┐
-│              builtin/                │        │                 rag/                 │
-│  代码阅读 (file)、终端执行 (bash)、    │        │  企业级 RAG 检索管线                  │
-│  NL2SQL、沙箱隔离环境                  │        │  - VectorStore 通用接口 (ES 默认 / PG)│
-└──────────────────────────────────────┘        │  - 基于 Kirby980/go-es 原生 KNN+BM25 │
-                                                │  - RRF 倒数排名融合 + Reranker 精排   │
-                                                └──────────────────────────────────────┘
-                                                                            │
-                                                                            ▼
-┌───────────────────────────────────────────────────────────────────────────────────────┐
-│                                       router/                                         │
-│                              多模型优先级路由与自动降级                                   │
-└──────────────────────────────────────────┬────────────────────────────────────────────┘
-                                           ▼
-┌───────────────────────────────────────────────────────────────────────────────────────┐
-│                                        llm/                                           │
-│                 统一 Provider 接口、OpenAI / Claude 适配、凭据自动探测 (detector)          │
-└──────────────────────────────────────────┬────────────────────────────────────────────┘
-                                           ▼
-┌───────────────────────────────────────────────────────────────────────────────────────┐
-│                                 internal/transport/                                   │
-│                     HTTP 客户端、指数退避重试、限流控制 (内部私有)                          │
-└───────────────────────────────────────────────────────────────────────────────────────┘
+│        mas/          │ │                tool/                 │
+│  6 大多智能体架构体系  │ │         工具契约、类型安全与注册表       │
+│  (Supervisor, Swarm, │ └──────────┬──────────────┬────────────┘
+│   Orchestrator, ...) │            │              │
+└──────────────────────┘            │              │
+           │                        ▼              ▼
+           │             ┌────────────────────┐ ┌────────────────────┐
+           ▼             │      builtin/      │ │        rag/        │
+┌──────────────────────┐ │ 文件操作、终端执行 │ │ 企业级 RAG 混合检索│
+│        plan/         │ │ 沙箱隔离环境       │ │ KNN+BM25+RRF 融合  │
+│  DAG 拓扑分层与并行   │ └────────────────────┘ └────────────────────┘
+└──────────────────────┘                                   │
+                                                           ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                               router/                             │
+│                      多模型优先级路由与自动降级容灾                 │
+└──────────────────────────────────┬────────────────────────────────┘
+                                   ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                                llm/                               │
+│        统一 Provider 接口、Claude (Prompt Caching)、OpenAI 兼容    │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -91,99 +99,140 @@
 
 ```text
 .
-├── agent/                       # [核心] Agent 执行引擎与调度中心
-│   ├── agent.go                 # Agent 结构体定义、配置项与主调度循环
-│   ├── approver.go              # 人类在环 (HITL) 命令审计与交互式终端放行
+├── cmd/                         # [CLI 交互入口]
+│   ├── main.go                  # 主程序循环、/team 团队模式、delegate_subagent 工具装配
+│   ├── editor.go                # 原生交互式终端行编辑器（实时下拉菜单、固定视口滚动、!shell）
+│   ├── editor_test.go           # 行编辑器单元测试（截断、无循环边界、消歧测试）
+│   └── config.go                # CLI 配置加载与环境变量映射
+├── agent/                       # [核心引擎] Agent 单体执行引擎与调度中心
+│   ├── agent.go                 # Agent 结构体定义、配置项与主调度循环 (Run / RunStream)
+│   ├── approver.go              # 人类在环 (HITL) 命令审计与交互式放行
 │   ├── budget.go                # 运行预算控制 (Token 上限、步数、死循环检测)
 │   ├── event.go                 # 流式事件类型 (Thought, ToolCall, Result 等)
-│   ├── function_call.go         # 原生 Function Calling 驱动执行循环
+│   ├── function_call.go         # 原生 Function Calling 执行驱动
 │   ├── react.go                 # ReAct 自愈提示词与解析执行循环
 │   ├── state.go                 # 运行状态快照与上下文历史
 │   └── store.go                 # 会话持久化接口与 FileStore 实现
-├── builtin/                     # [内置工具] 面向开发者的系统级工具集
-│   ├── bash.go                  # 终端命令执行工具 (超时中断、输出截断防护)
-│   ├── file.go                  # 代码库阅读 (read_file) 与目录巡检 (list_dir)
-│   ├── nl2sql.go                # 自然语言转 SQL 工具与动态元数据注入
-│   └── sandbox.go               # 沙箱命令隔离环境
-├── rag/                         # [RAG] 企业级知识库检索与向量存储
-│   ├── store.go                 # 通用 VectorStore 接口定义与 NewVectorStore 工厂
+├── mas/                         # [多智能体系统 MAS] 6 种经典多智能体协作范式
+│   ├── supervisor.go            # 主管-工作者 (Supervisor-Worker) 中心督导模式
+│   ├── orchestrator.go          # 分治编排与上下文物理隔离 (Isolated Orchestrator)
+│   ├── swarm.go                 # 去中心化接力转交模式 (OpenAI Swarm 理念)
+│   ├── pipeline.go              # 链式管道流水线 (Pipeline)
+│   ├── multi-agent-debate.go    # 交叉辩论与一致性共识 (Multi-Agent Debate)
+│   ├── chat.go                  # 单轮 LLM 对话辅助函数
+│   ├── msg.go                   # 统一消息模型
+│   └── msg-bus.go               # 事件总线广播圆桌会议 (GroupChat)
+├── plan/                        # [DAG 规划] 任务依赖图规划执行器
+│   ├── plan.go                  # Task 与 Plan 结构定义
+│   ├── levels.go                # 基于 Kahn 算法的拓扑分层与循环依赖检测
+│   └── execute.go               # 按拓扑层级并行并发执行
+├── builtin/                     # [内置工具]
+│   ├── bash.go                  # 终端命令执行工具 (超时控制、输出截断防护)
+│   ├── file.go                  # 代码阅读 (read_file)、写文件与替换内容
+│   ├── nl2sql.go                # 自然语言转 SQL 工具
+│   └── sandbox.go               # 沙箱隔离环境
+├── rag/                         # [企业级 RAG]
+│   ├── store.go                 # 通用 VectorStore 接口定义与工厂
 │   ├── es.go                    # 基于 Kirby980/go-es 的高性能 ES 驱动 (KNN + BM25)
 │   ├── pgx.go                   # 基于 pgx + pgvector 的 PostgreSQL 驱动
-│   ├── rerank.go                # Retriever 检索编排器 (双路召回 + 重排精排)
-│   ├── rrf.go                   # RRF (Reciprocal Rank Fusion) 倒数排名融合算法
-│   ├── chuck.go                 # 递归分块器 (RecursiveChunker，中文友好带 Overlap)
-│   ├── embedding.go             # Embedder 稠密向量接口定义
-│   ├── openai.go                # OpenAI / LiteLLM 兼容的向量化客户端
-│   └── tool.go                  # 知识库检索 Agent 工具封装 (SearchTool)
-├── tool/                        # [工具契约]
-│   └── tool.go                  # Tool 接口、强类型工具转换与 Registry 注册表
-├── skill/                       # [技能] Agent Skills 体系
-│   └── skill.go                 # 遵循标准规范的 SKILL.md 自动扫描与挂载
-├── mcp/                         # [协议] Model Context Protocol 支持
-│   ├── client.go                # MCP 客户端核心驱动
-│   └── bridged.go               # 将 MCP Tool 映射为原生 Tool 桥接器
-├── llm/                         # [模型层] 统一 Provider 抽象与多厂商协议
-│   ├── llm.go                   # Provider 接口、Message 结构体定义
-│   ├── cost.go                  # Token 费用统计
-│   ├── detector/                # 跨平台 (macOS/Win/Linux) 本地凭据探测
-│   ├── claude/                  # Anthropic Claude 适配器
-│   └── openai/                  # OpenAI 兼容协议适配器 (DeepSeek, 豆包, 千问等)
-├── plan/                        # [编排] DAG 任务规划执行器
-│   ├── plan.go                  # Task 与 Plan 结构定义
-│   ├── levels.go                # 拓扑分层算法 (入度检测与环路检查)
-│   └── execute.go               # 按拓扑层级并行执行
-├── patterns/                    # [模式] 经典进阶 Agent 编排流水线
-│   ├── pge.go                   # PGE (Plan-Gen-Eval) 三层代码审查流水线
-│   ├── routeting.go             # 意图分类与动态前置路由
-│   ├── evaluation.go            # 生成-评估-优化循环
-│   └── orchestrator.go          # 任务分治编排
-├── router/                      # [容灾路由] 多模型优先级与负载均衡
-├── cmd/                         # [命令行] CLI 交互入口
-└── internal/transport/          # [网络基础设施] 重试、退避、限流
+│   ├── rerank.go                # Retriever 检索编排器 (双路召回 + 重排)
+│   ├── rrf.go                   # RRF (倒数排名融合) 算法
+│   └── chuck.go                 # 递归中文友好文本分块器
+├── tool/                        # [工具契约] Tool 接口、强类型泛型工具 (TypedTool) 与注册表
+├── skill/                       # [技能生态] SKILL.md 规范自动扫描与挂载
+├── mcp/                         # [协议生态] Model Context Protocol (MCP) 客户端与工具桥接
+├── llm/                         # [模型层] 统一 Provider、Claude (Prompt Caching)、OpenAI 兼容
+└── router/                      # [模型路由器] 多 Provider 轮询与主备降级
 ```
 
 ---
 
 ## 🚀 快速上手
 
-### 1. 运行类 Claude Code 交互式代码助手
+### 1. 启动交互式 CLI 终端助手
 
-配置大模型凭据后即可直接启动。助手已默认挂载代码阅读、目录查看以及安全受控的终端执行工具：
+配置环境变量或配置文件后直接启动：
 
 ```bash
-export supplier="openai"
-export name="gemini"
-export base_url="http://localhost:4000/v1"
+export supplier="anthropic"       # 或 "openai"
+export name="claude-3-5-sonnet"   # 或 "gemini-2.5-pro", "gpt-4o"
+export base_url="https://api.anthropic.com/v1"
 export key="your-api-key"
 
-go run ./cmd/main.go
+go run ./cmd
 ```
 
-**交互示例**：
+启动后会看到交互式欢迎界面：
 ```text
-Agent 已就绪，请输入你的指令 (输入 exit 退出):
-> 帮我查看当前目录下的 go.mod 内容，并列出 rag 目录下的所有文件
+╭─────────────────────────────────────────────────────────────╮
+│   ✦ Go-Agent CLI (Codex / Claude Code 架构)                 │
+│   会话: default      | 模型: claude-3-5-sonnet               │
+│   工作目录: /home/user/myproject                            │
+│   输入 / 唤起指令菜单, !<命令> 执行 Shell, /exit 退出        │
+╰─────────────────────────────────────────────────────────────╯
 
-[调用工具] read_file 参数: {"path":"go.mod"}
-[工具返回] module github.com/Kirby980/agent ...
-[调用工具] list_dir 参数: {"path":"rag"}
-[工具返回] - chuck.go (file) ...
-...
-```
-
-当大模型尝试执行写操作或破坏性 Shell 命令（如 `rm` 或 `git clean`）时，**Approver 安全卫士会自动拦截并提示用户确认**：
-```text
-[安全警告] 准备执行系统命令:
-  rm -rf ./tmp_cache
-是否批准执行? [y:批准 / a:本次全部批准 / n:拒绝]:
+agent (default) > 
 ```
 
 ---
 
-### 2. 企业级 RAG 检索管线（基于 `Kirby980/go-es`）
+### 2. 交互式指令与本地 Shell 直通
 
-#### 写入与检索实战
+在输入行中：
+- **键入 `/`**：立即弹出指令候选列表，通过 `↑` / `↓` 移动选择，`Tab` 补全，`Enter` 确认：
+  ```text
+  agent (default) > /
+    ❯ /help      - 打印帮助信息与支持的指令列表
+      /new       - 开启全新对话会话 (重置当前记忆)
+      /resume    - 恢复指定名称的历史会话记忆
+      /sessions  - 列出本地保存的所有历史会话记录
+      /model     - 查看当前活动模型或切换新模型
+      /team      - 启动 Supervisor 多智能体团队协同执行复杂任务
+      /stats     - 查看当前会话 Token 用量与缓存命中率
+      /clear     - 清空当前控制台屏幕
+      /exit      - 退出 CLI 程序
+  ```
+- **输入 `!<cmd>` 直通本地 Shell**：
+  ```bash
+  agent (default) > !git status
+  agent (default) > !go test ./...
+  agent (default) > !pwd
+  ```
 
+---
+
+### 3. 多智能体协作实战
+
+#### ① 自动 Subagent 委派（日常对话）
+在日常对话中遇到繁琐复杂任务时，主 Agent 会自主调用 `delegate_subagent` 工具，在物理隔离的全新上下文中召唤专职子 Agent：
+```text
+agent (default) > 调研 plan 模块和 mas 模块的架构设计，对比两者的调度差异并总结汇报
+
+[调用工具] delegate_subagent({"role":"researcher","task":"调研 plan 与 mas 模块..."})
+
+┌── 🤖 [启动 Subagent: researcher] ───────────────────────────────
+│ 目标: 调研 plan 与 mas 模块...
+└────────────────────────────────────────────────────────
+  [researcher 工具] list_dir({"DirectoryPath":"plan"})
+  [researcher 结果] [...]
+  [researcher 思考] 分析拓扑调度模式...
+✔ [Subagent: researcher 执行完成]
+
+[工具结果] 【子智能体 researcher 的执行汇报】...
+```
+
+#### ② `/team` 主管督导团队模式
+针对复杂工程改造，直接通过 `/team` 命令唤起多智能体团队：
+```bash
+agent (default) > /team 审计 mas 模块的代码质量并编写单元测试
+```
+系统将启动 Supervisor 调度 `researcher`、`coder`、`reviewer` 三位专职成员链式推进，并在控制台实时呈现每轮指派与交付成果，直到全案达成 `FINISH`。
+
+---
+
+### 4. 代码中直接调用多智能体与 DAG 编排
+
+#### ① 调用 Supervisor 团队
 ```go
 package main
 
@@ -191,50 +240,35 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Kirby980/agent/rag"
+	"github.com/Kirby980/agent/agent"
+	"github.com/Kirby980/agent/mas"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// 1. 初始化向量存储（工厂函数，默认使用 Elasticsearch）
-	store, err := rag.NewVectorStore(ctx, rag.StoreConfig{
-		Type:    rag.StoreTypeES,            // 可选：rag.StoreTypePG
-		ESHost:  "http://localhost:9200",
-		ESIndex: "enterprise_kb",
-	})
+	workers := map[string]*agent.Agent{
+		"researcher": agent.New(provider, "claude-3-5-sonnet", registry),
+		"coder":      agent.New(provider, "claude-3-5-sonnet", registry),
+		"reviewer":   agent.New(provider, "claude-3-5-sonnet", registry),
+	}
+
+	sup := &mas.Supervisor{
+		Provider: provider,
+		Model:    "claude-3-5-sonnet",
+		Workers:  workers,
+		MaxTurns: 8,
+	}
+
+	result, err := sup.Run(ctx, "重构用户认证模块并补充单测")
 	if err != nil {
 		panic(err)
 	}
-
-	// 2. 批量写入文档分块与对应向量（内部采用 go-es 的 BulkBuilder 零反射极速入库）
-	chunks := []string{
-		"当微信支付返回 40301 错误码时，说明商户证书已失效，需重新下载并更新至网关。",
-		"退款接口每日限额在商户平台后台可配置，默认单笔不超过 5 万元。",
-	}
-	embs := [][]float32{
-		// ... 对应的 768 维向量
-	}
-	_ = store.Add(ctx, "payment_manual.pdf", chunks, embs)
-
-	// 3. 构建混合检索编排器（同时做 KNN 向量召回 + BM25 倒排召回，自动 RRF 融合）
-	retriever := &rag.Retriever{
-		Store:    store,
-		Embedder: embedder, // 你的 Embedder 实例
-	}
-
-	// 4. 将检索器一键包装为 Agent 工具
-	kbTool := rag.SearchTool(retriever)
-	_ = kbTool
+	fmt.Println(result)
 }
 ```
 
----
-
-### 3. DAG 任务规划执行器
-
-支持通过有向无环图自动并行化独立任务，按依赖拓扑层级递进执行：
-
+#### ② 调用 DAG 拓扑分层任务编排
 ```go
 package main
 
@@ -249,10 +283,10 @@ import (
 func main() {
 	p := plan.Plan{
 		Tasks: []plan.Task{
-			{ID: "fetch_api_doc", Tool: "read_file", Args: json.RawMessage(`{"path":"docs/api.md"}`)},
-			{ID: "fetch_db_schema", Tool: "read_file", Args: json.RawMessage(`{"path":"schema.sql"}`)},
+			{ID: "fetch_api", Tool: "read_file", Args: json.RawMessage(`{"path":"api.md"}`)},
+			{ID: "fetch_db", Tool: "read_file", Args: json.RawMessage(`{"path":"schema.sql"}`)},
 			// analyze 依赖前两项任务的结果，前两项并行执行完成后自动触发 analyze
-			{ID: "analyze", Tool: "analyze_diff", DependsOn: []string{"fetch_api_doc", "fetch_db_schema"}},
+			{ID: "analyze", Tool: "diff", DependsOn: []string{"fetch_api", "fetch_db"}},
 		},
 	}
 
@@ -266,57 +300,12 @@ func main() {
 
 ---
 
-## 💡 深度思考：这个任务真的需要三 Agent 吗？
-
-在本项目中，我们实现了经典的 **PGE (Plan-Gen-Eval)** 三层架构代码审查流（位于 [`patterns/pge.go`](patterns/pge.go)）：
-1. **Planner**：大模型充当意图与维度分类器，将代码审查解构为并发安全、性能、错误处理、架构规范等具体维度；
-2. **Generator**：并行调用多个 Worker 针对各维度独立审查，最终汇总为一份审查草稿；
-3. **Evaluator-Optimizer**：评估模型严格质检打分，未达标时带着反馈进行多轮自愈修订，直至达标。
-
-但作为一个追求工程实用主义与高性价比的系统，我们必须直面这个关键问题：
-
-> **这个任务真的需要三 Agent 吗？什么情况下一个精心提示的单次调用就够了？**
-
-### 一、三 Agent (PGE) 的真正价值与代价
-
-#### 1. 核心价值（何时体现优势）
-- **突破长上下文的“注意力稀释 (Lost in the Middle)”**：
-  若要求单个模型在单次调用中同时全面兼顾“Go 内存泄漏、锁竞争、边界越界、错误处理、架构可读性”，模型注意力容易涣散，难以深挖隐蔽 Bug。分维度由独立 Worker 审查可极大提升**缺陷检出率（Recall）**。
-- **引入闭环质检（Evaluator 反思兜底）**：
-  单次生成不可避免存在偶发幻觉或泛泛而谈。引入独立的 Evaluator 按量化指标（如 Score ≥ 80、必须提供代码证据）质检，不达标则循环打回重改，大幅提升输出的**严谨性与确定性**。
-- **异构模型分级调度（Cost & Capability Routing）**：
-  三层可解耦采用不同模型（如轻量模型做 Planner 拆解，专业代码模型做并行审查，最顶级的旗舰模型做 Evaluator 把关），在质量与成本间取得最佳平衡。
-
-#### 2. 付出的代价（固有缺点）
-- **高延迟 (Latency)**：
-  单次审查需要经历：`意图分类 (1次) + 维度规划 (1次) + 维度并行 (N个Task) + 报告整合 (1次) + 质检打分 (1次) + 潜在重试循环 (2~3轮)`。端到端耗时通常在 **15s ~ 45s+**，无法胜任即时交互。
-- **高 Token 消耗 (Cost)**：
-  代码与上下文在多个 Agent 间反复传输与汇总，Token 消耗是单次调用的 **5 ~ 10 倍**。
-
----
-
-### 二、架构决策矩阵与工程法则
-
-| 考量维度 | 单次精心提示 (Single-Call) | 三 Agent 审查 (PGE) |
-| :--- | :--- | :--- |
-| **响应耗时** | ⚡ **秒级响应（2~5s，支持逐字流式）** | ⏳ **较慢（15~45s+，多轮往返）** |
-| **Token 成本** | 💰 **极低（1x 基准）** | 💸 **高（5x ~ 10x）** |
-| **工程复杂度** | 🟢 **极简（无额外状态与编排）** | 🔴 **较高（DAG/并行/多轮质检状态维护）** |
-| **代码规模** | 中小型函数、局部变更（< 200 行） | 跨文件模块、复杂并发状态机、核心重构 |
-| **典型场景** | IDE 实时插件、本地 CLI、高频巡检 | CI/CD 发布门禁、核心资产安全审计、离线夜报 |
-
-> **💡 架构设计法则**：
-> 1. **不要为了 Agent 而 Agent**。代码探索和审查优先尝试单模型配合丰富工具（`read_file`、`ripgrep`、`bash`）自主探索。
-> 2. 当遇到**长代码注意力稀释、复杂多维度审查漏报率高、或业务要求硬性打分质检门禁**时，再升级为 **PGE 多 Agent 架构**。
-
----
-
 ## 🧪 自动化测试与质量保障
 
-项目配有完善的单元测试套件，覆盖核心执行引擎、RAG 向量检索与 RRF 融合算法、DAG 并行调度器等所有模块：
+项目配有完整的单元测试套件：
 
 ```bash
-# 运行全项目单元测试
+# 运行全部单元测试
 go test -v ./...
 
 # 运行竞态并发安全检测
