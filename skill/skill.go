@@ -100,7 +100,7 @@ func (s Skill) Body() (string, error) {
 }
 
 type readSkillArgs struct {
-	Name string `json:"name" desc: "要查询的技能名称"`
+	Name string `json:"name" desc:"要查询的技能名称"`
 }
 
 func NewSkillTool(Skills []Skill) tool.Tool {
