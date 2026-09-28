@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kirby980/agent/ctxeng"
 	"github.com/Kirby980/agent/llm"
 )
 
@@ -18,11 +19,33 @@ import (
 // 5. 若输出 Final Answer 则正常结束；若输出 Action 则调用相应工具，并将结果拼接为 Observation 追加到历史中继续循环
 func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emit func(AgentEvent) bool) {
 	healAttempts := 0
+	var compactedThisTurn bool
+	var turnUsage llm.Usage
 	for {
 		// --停止条件检查
 		if stop, reason := agent.budget.Exceeded(state); stop {
-			agent.finishError(ctx, state, emit, "提前终止"+reason)
+			agent.finishError(ctx, state, emit, "提前终止"+reason, &turnUsage)
 			return
+		}
+
+		// 上下文预算门控治理：单轮执行内最多触发一次压缩，防止多工具调用循环中过度压缩
+		if agent.ctxBudget != nil && agent.ctxBudget.History > 0 && !compactedThisTurn {
+			historyText := ctxeng.JoinContent(state.Messages)
+			if agent.ctxBudget.IsHistoryOver(historyText) {
+				beforeTok := ctxeng.EstimateTokens(historyText)
+				compacted, err := ctxeng.Compact(ctx, state.Messages, agent.keepRecent, agent.summarize)
+				if err == nil && len(compacted) < len(state.Messages) {
+					compactedThisTurn = true
+					afterTok := ctxeng.EstimateTokens(ctxeng.JoinContent(compacted))
+					emit(AgentEvent{
+						Type: EventThought,
+						Text: fmt.Sprintf("[上下文治理] 历史消息超预算 (%d tok > %d)，已触发 Compact 压缩至 %d tok",
+							beforeTok, agent.ctxBudget.History, afterTok),
+						Step: state.Step,
+					})
+					state.Messages = compacted
+				}
+			}
 		}
 
 		req := llm.ChatRequest{
@@ -76,6 +99,10 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 				}
 			}
 			if lastUsage != nil {
+				turnUsage.InputTokens += lastUsage.InputTokens
+				turnUsage.OutputTokens += lastUsage.OutputTokens
+				turnUsage.CachedTokens += lastUsage.CachedTokens
+
 				state.Usage.InputTokens += lastUsage.InputTokens
 				state.Usage.OutputTokens += lastUsage.OutputTokens
 				state.Usage.CachedTokens += lastUsage.CachedTokens
@@ -86,7 +113,7 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 			// 非流式阶段：使用底层的 Chat 阻塞调用
 			resp, err := agent.provider.Chat(ctx, req)
 			if err != nil {
-				agent.finishError(ctx, state, emit, err.Error())
+				agent.finishError(ctx, state, emit, err.Error(), &turnUsage)
 				return
 			}
 			u := &llm.Usage{
@@ -94,6 +121,10 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 				OutputTokens: resp.OutputTokens,
 				CachedTokens: resp.CachedTokens,
 			}
+			turnUsage.InputTokens += u.InputTokens
+			turnUsage.OutputTokens += u.OutputTokens
+			turnUsage.CachedTokens += u.CachedTokens
+
 			state.Usage.InputTokens += u.InputTokens
 			state.Usage.OutputTokens += u.OutputTokens
 			state.Usage.CachedTokens += u.CachedTokens
@@ -131,7 +162,12 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 			if !streamedAnswerDeltas {
 				emit(AgentEvent{Type: EventAnswerDelta, Text: step.FinalAnswer, Step: state.Step})
 			}
-			emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
+			emit(AgentEvent{
+				Type:       EventDone,
+				Step:       state.Step,
+				Usage:      &turnUsage,
+				TotalUsage: &state.Usage,
+			})
 			return
 		}
 
@@ -160,13 +196,17 @@ func (agent *Agent) runReAct(ctx context.Context, state *State, stream bool, emi
 }
 
 // finishError 把状态置为终态 error，落盘，并发出 error + done 两个事件。
-func (agent *Agent) finishError(ctx context.Context, state *State, emit func(AgentEvent) bool, msg string) {
+func (agent *Agent) finishError(ctx context.Context, state *State, emit func(AgentEvent) bool, msg string, turnUsage ...*llm.Usage) {
 	state.Phase = PhaseError
 	state.Answer = ""
 	state.UpdatedAt = time.Now()
 	agent.checkpoint(ctx, state)
 	emit(AgentEvent{Type: EventError, Text: msg, Step: state.Step})
-	emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
+	var u *llm.Usage
+	if len(turnUsage) > 0 {
+		u = turnUsage[0]
+	}
+	emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: u, TotalUsage: &state.Usage})
 }
 
 // callTool 执行工具，返回喂回模型的观察文本。
@@ -188,6 +228,15 @@ func (agent *Agent) callTool(ctx context.Context, name string, args json.RawMess
 	out, err := t.Call(ctx, args)
 	if err != nil {
 		return "错误：" + err.Error()
+	}
+	// 如果启用了长文本外置存储，且当前工具并非只读查看工具（read_memory, read_file）
+	// read_file 是开发者与模型明确请求查阅代码或配置的工具，不应外置截断
+	if agent.fileMemory != nil && agent.offloadThreshold > 0 && name != "read_memory" && name != "read_file" {
+		if ctxeng.EstimateTokens(out) >= agent.offloadThreshold {
+			if offloaded, offErr := agent.fileMemory.Offload(out, agent.offloadThreshold); offErr == nil {
+				return offloaded
+			}
+		}
 	}
 	return out
 }

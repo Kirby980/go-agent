@@ -38,6 +38,22 @@ func NewRegistry(tools ...Tool) *Registry {
 	return r
 }
 
+// Register 向注册表中新增或更新工具。
+func (r *Registry) Register(tools ...Tool) {
+	if r == nil {
+		return
+	}
+	if r.tools == nil {
+		r.tools = make(map[string]Tool, len(tools))
+	}
+	for _, item := range tools {
+		if item == nil {
+			continue
+		}
+		r.tools[item.Name()] = item
+	}
+}
+
 // Get 按工具名检索已注册的工具。
 func (r *Registry) Get(name string) (Tool, bool) {
 	if r == nil {

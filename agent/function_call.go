@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kirby980/agent/ctxeng"
 	"github.com/Kirby980/agent/llm"
 )
 
@@ -22,16 +23,38 @@ func (agent *Agent) runFunctionCalling(
 	stream bool,
 	emit func(AgentEvent) bool,
 ) {
+	var compactedThisTurn bool
+	var turnUsage llm.Usage
 	for {
 		if stop, reason := agent.budget.Exceeded(state); stop {
-			agent.finishError(ctx, state, emit, "提前终止："+reason)
+			agent.finishError(ctx, state, emit, "提前终止："+reason, &turnUsage)
 			return
+		}
+
+		// 上下文预算门控治理：单轮执行内最多触发一次压缩，防止多工具调用循环中过度压缩导致上下文丢失
+		if agent.ctxBudget != nil && agent.ctxBudget.History > 0 && !compactedThisTurn {
+			historyText := ctxeng.JoinContent(state.Messages)
+			if agent.ctxBudget.IsHistoryOver(historyText) {
+				beforeTok := ctxeng.EstimateTokens(historyText)
+				compacted, err := ctxeng.Compact(ctx, state.Messages, agent.keepRecent, agent.summarize)
+				if err == nil && len(compacted) < len(state.Messages) {
+					compactedThisTurn = true
+					afterTok := ctxeng.EstimateTokens(ctxeng.JoinContent(compacted))
+					emit(AgentEvent{
+						Type: EventThought,
+						Text: fmt.Sprintf("[上下文治理] 历史消息超预算 (%d tok > %d)，已触发 Compact 压缩至 %d tok (%d 条消息)",
+							beforeTok, agent.ctxBudget.History, afterTok, len(compacted)),
+						Step: state.Step,
+					})
+					state.Messages = compacted
+				}
+			}
 		}
 
 		req := llm.ChatRequest{
 			Model:    agent.model,
 			Messages: state.Messages,
-			Tools:    agent.toolDefs(),
+			Tools:    agent.toolDefs(state),
 		}
 
 		var content string
@@ -68,6 +91,10 @@ func (agent *Agent) runFunctionCalling(
 				}
 			}
 			if lastUsage != nil {
+				turnUsage.InputTokens += lastUsage.InputTokens
+				turnUsage.OutputTokens += lastUsage.OutputTokens
+				turnUsage.CachedTokens += lastUsage.CachedTokens
+
 				state.Usage.InputTokens += lastUsage.InputTokens
 				state.Usage.OutputTokens += lastUsage.OutputTokens
 				state.Usage.CachedTokens += lastUsage.CachedTokens
@@ -77,7 +104,7 @@ func (agent *Agent) runFunctionCalling(
 		} else {
 			resp, err := agent.provider.Chat(ctx, req)
 			if err != nil {
-				agent.finishError(ctx, state, emit, err.Error())
+				agent.finishError(ctx, state, emit, err.Error(), &turnUsage)
 				return
 			}
 			u := &llm.Usage{
@@ -85,6 +112,10 @@ func (agent *Agent) runFunctionCalling(
 				OutputTokens: resp.OutputTokens,
 				CachedTokens: resp.CachedTokens,
 			}
+			turnUsage.InputTokens += u.InputTokens
+			turnUsage.OutputTokens += u.OutputTokens
+			turnUsage.CachedTokens += u.CachedTokens
+
 			state.Usage.InputTokens += u.InputTokens
 			state.Usage.OutputTokens += u.OutputTokens
 			state.Usage.CachedTokens += u.CachedTokens
@@ -119,7 +150,7 @@ func (agent *Agent) runFunctionCalling(
 				answer = step.FinalAnswer
 			}
 			if answer == "" {
-				agent.finishError(ctx, state, emit, "模型返回空响应：没有回答内容，也没有工具调用")
+				agent.finishError(ctx, state, emit, "模型返回空响应：没有回答内容，也没有工具调用", &turnUsage)
 				return
 			}
 			state.Phase = PhaseDone
@@ -132,7 +163,12 @@ func (agent *Agent) runFunctionCalling(
 			if !streamedAnswerDeltas {
 				emit(AgentEvent{Type: EventAnswerDelta, Text: answer, Step: state.Step})
 			}
-			emit(AgentEvent{Type: EventDone, Step: state.Step, Usage: &state.Usage})
+			emit(AgentEvent{
+				Type:       EventDone,
+				Step:       state.Step,
+				Usage:      &turnUsage,
+				TotalUsage: &state.Usage,
+			})
 			return
 		}
 
@@ -164,10 +200,30 @@ func (agent *Agent) runFunctionCalling(
 	}
 }
 
-// toolDefs 把注册表里的工具转成给模型的定义清单。
-func (agent *Agent) toolDefs() []llm.ToolDef {
+// toolDefs 把注册表里的工具转成给模型的定义清单，支持按当前意图动态裁剪。
+func (agent *Agent) toolDefs(state *State) []llm.ToolDef {
 	if agent.tools == nil {
 		return nil
+	}
+	all := agent.tools.All()
+	if agent.maxSelectTools > 0 && len(all) > agent.maxSelectTools && state != nil {
+		query := state.Goal
+		for i := len(state.Messages) - 1; i >= 0; i-- {
+			if state.Messages[i].Role == llm.RoleUser {
+				query = state.Messages[i].Content
+				break
+			}
+		}
+		selected := ctxeng.SelectTools(query, all, agent.maxSelectTools)
+		defs := make([]llm.ToolDef, 0, len(selected))
+		for _, t := range selected {
+			defs = append(defs, llm.ToolDef{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			})
+		}
+		return defs
 	}
 	return agent.tools.ToolDefs()
 }

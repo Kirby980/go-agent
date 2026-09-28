@@ -22,11 +22,17 @@ func NewFileSystem(root string) (*FileSystem, error) {
 	return &FileSystem{root: abs}, nil
 }
 
-// safePath 把相对路径解析为根目录内的绝对路径，越界则报错。
+// safePath 把相对路径或绝对路径解析为根目录内的规范路径，越界则报错。
 func (fs *FileSystem) safePath(p string) (string, error) {
-	clean := filepath.Clean(filepath.Join(fs.root, p))
+	p = strings.TrimSpace(p)
+	var clean string
+	if filepath.IsAbs(p) {
+		clean = filepath.Clean(p)
+	} else {
+		clean = filepath.Clean(filepath.Join(fs.root, p))
+	}
 	if clean != fs.root && !strings.HasPrefix(clean, fs.root+string(os.PathSeparator)) {
-		return "", fmt.Errorf("路径越界，拒绝访问: %s", p)
+		return "", fmt.Errorf("路径越界，拒绝访问: %s (项目根目录: %s)", p, fs.root)
 	}
 	return clean, nil
 }

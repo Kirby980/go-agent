@@ -8,6 +8,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/chzyer/readline"
 )
 
 // Approver 权限与安全审批器接口
@@ -29,10 +32,13 @@ func NewConsoleApprover() *ConsoleApprover {
 		alwaysAllowTools:    make(map[string]bool),
 		alwaysAllowCommands: make(map[string]bool),
 		safeTools: map[string]bool{
-			"read_file":  true,
-			"list_dir":   true,
-			"get_time":   true,
-			"read_skill": true,
+			"read_file":             true,
+			"list_dir":              true,
+			"get_time":              true,
+			"read_skill":            true,
+			"read_memory":           true,
+			"search_knowledge_base": true,
+			"delegate_subagent":     true,
 		},
 	}
 }
@@ -136,12 +142,35 @@ func (c *ConsoleApprover) Approve(ctx context.Context, toolName string, args str
 		cleanArgs = cleanArgs[:300] + "...(截断)"
 	}
 
-	fmt.Printf("\n⚠️  [工具安全审批] Agent 尝试调用具有潜在风险或未知的工具:\n")
-	fmt.Printf("   ├─ 工具名称: %s\n", toolName)
-	fmt.Printf("   └─ 调用参数: %s\n", cleanArgs)
-	fmt.Print("   👉 是否允许执行? [y] 允许本次 / [a] 本次会话总是允许该工具 / [n] 拒绝 (默认 n): ")
+	fmt.Printf("\n⚠️  \033[33;1m[工具安全审批]\033[0m Agent 尝试调用具有潜在风险或未知的工具:\n")
+	fmt.Printf("   ├─ 工具名称: \033[36m%s\033[0m\n", toolName)
+	fmt.Printf("   └─ 调用参数: \033[90m%s\033[0m\n\n", cleanArgs)
 
-	return c.promptUser(toolName, false, "")
+	options := []string{
+		"允许本次执行 (Allow once)",
+		fmt.Sprintf("本次会话总是允许该工具 (%s)", toolName),
+		"拒绝执行 (Reject)",
+	}
+
+	choice, err := selectApprovalMenu(options, 0)
+	if err != nil {
+		return false, err
+	}
+
+	switch choice {
+	case 0:
+		fmt.Printf("   👉 审批结果: \033[32m✔ 允许本次执行\033[0m\n\n")
+		return true, nil
+	case 1:
+		c.mu.Lock()
+		c.alwaysAllowTools[toolName] = true
+		c.mu.Unlock()
+		fmt.Printf("   👉 审批结果: \033[32m✔ 本次会话已总是允许该工具 (%s)\033[0m\n\n", toolName)
+		return true, nil
+	default:
+		fmt.Printf("   👉 审批结果: \033[31m✖ 已拒绝执行\033[0m\n\n")
+		return false, nil
+	}
 }
 
 func (c *ConsoleApprover) approveBash(ctx context.Context, toolName string, args string) (bool, error) {
@@ -173,35 +202,180 @@ func (c *ConsoleApprover) approveBash(ctx context.Context, toolName string, args
 	}
 
 	// 发现危险命令（如 rm）或未知命令，暂停并向用户弹窗询问
-	fmt.Printf("\n🚨 [Shell 命令安全审批] 拦截到非只读或高危操作:\n")
-	fmt.Printf("   ├─ 拦截原因: %s\n", reason)
-	fmt.Printf("   └─ 目标命令: %s\n", rawCmd)
-	fmt.Print("   👉 是否允许在你的系统上执行? [y] 允许本次 / [a] 本次会话始终允许此命令 / [n] 拒绝 (默认 n): ")
+	fmt.Printf("\n🚨 \033[31;1m[Shell 命令安全审批]\033[0m 拦截到非只读或高危操作:\n")
+	fmt.Printf("   ├─ 拦截原因: \033[33m%s\033[0m\n", reason)
+	fmt.Printf("   └─ 目标命令: \033[36m%s\033[0m\n\n", rawCmd)
 
-	return c.promptUser(toolName, true, rawCmd)
-}
+	options := []string{
+		"允许本次执行该命令 (Allow once)",
+		fmt.Sprintf("本次会话始终允许此命令 (%s)", rawCmd),
+		"拒绝执行 (Reject)",
+	}
 
-func (c *ConsoleApprover) promptUser(toolName string, isCommand bool, rawCmd string) (bool, error) {
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
+	choice, err := selectApprovalMenu(options, 0)
 	if err != nil {
 		return false, err
 	}
-	ans := strings.ToLower(strings.TrimSpace(input))
 
-	switch ans {
-	case "y", "yes":
+	switch choice {
+	case 0:
+		fmt.Printf("   👉 审批结果: \033[32m✔ 允许本次执行\033[0m\n\n")
 		return true, nil
-	case "a", "always":
+	case 1:
 		c.mu.Lock()
-		if isCommand && rawCmd != "" {
-			c.alwaysAllowCommands[rawCmd] = true
-		} else {
-			c.alwaysAllowTools[toolName] = true
-		}
+		c.alwaysAllowCommands[rawCmd] = true
 		c.mu.Unlock()
+		fmt.Printf("   👉 审批结果: \033[32m✔ 本次会话已始终允许此命令\033[0m\n\n")
 		return true, nil
 	default:
+		fmt.Printf("   👉 审批结果: \033[31m✖ 已拒绝执行\033[0m\n\n")
 		return false, nil
+	}
+}
+
+// selectApprovalMenu 交互式终端上下键选择菜单（对标 Claude Code / AGY / Codex）
+func selectApprovalMenu(options []string, defaultIdx int) (int, error) {
+	fd := int(os.Stdin.Fd())
+	oldState, err := readline.MakeRaw(fd)
+	if err != nil {
+		// 非交互式终端环境（测试或管道重定向），降级为标准输入行读取
+		return selectApprovalFallback(options, defaultIdx)
+	}
+	defer func() {
+		_ = readline.Restore(fd, oldState)
+	}()
+
+	selected := defaultIdx
+	if selected < 0 || selected >= len(options) {
+		selected = 0
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+
+	// 隐藏光标
+	fmt.Print("\033[?25l")
+	defer fmt.Print("\033[?25h")
+
+	renderMenu := func(first bool) {
+		if !first {
+			fmt.Printf("\033[%dA", len(options))
+		}
+		for i, opt := range options {
+			fmt.Print("\r\033[K")
+			if i == selected {
+				if i == len(options)-1 {
+					fmt.Printf("   \033[31;1m❯ %s\033[0m\r\n", opt)
+				} else {
+					fmt.Printf("   \033[32;1m❯ %s\033[0m\r\n", opt)
+				}
+			} else {
+				fmt.Printf("     \033[90m%s\033[0m\r\n", opt)
+			}
+		}
+	}
+
+	renderMenu(true)
+
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			clearMenu(len(options))
+			return defaultIdx, err
+		}
+
+		switch b {
+		case 3: // Ctrl+C: 取消并拒绝
+			clearMenu(len(options))
+			return len(options) - 1, nil
+
+		case 13, 10: // Enter (CR / LF)
+			clearMenu(len(options))
+			return selected, nil
+
+		case 27: // ESC 或方向键序列
+			if reader.Buffered() == 0 {
+				time.Sleep(15 * time.Millisecond)
+			}
+			if reader.Buffered() > 0 {
+				b2, err := reader.ReadByte()
+				if err == nil && b2 == '[' {
+					b3, err := reader.ReadByte()
+					if err == nil {
+						switch b3 {
+						case 'A': // Up Arrow
+							if selected > 0 {
+								selected--
+								renderMenu(false)
+							}
+						case 'B': // Down Arrow
+							if selected < len(options)-1 {
+								selected++
+								renderMenu(false)
+							}
+						}
+					}
+				}
+			} else {
+				// 单独按 Esc：取消/拒绝
+				clearMenu(len(options))
+				return len(options) - 1, nil
+			}
+
+		case 'k', 'K': // vim 键位向上
+			if selected > 0 {
+				selected--
+				renderMenu(false)
+			}
+
+		case 'j', 'J': // vim 键位向下
+			if selected < len(options)-1 {
+				selected++
+				renderMenu(false)
+			}
+
+		case '1', 'y', 'Y':
+			clearMenu(len(options))
+			return 0, nil
+
+		case '2', 'a', 'A':
+			if len(options) > 1 {
+				clearMenu(len(options))
+				return 1, nil
+			}
+
+		case '3', 'n', 'N', 'q', 'Q':
+			clearMenu(len(options))
+			return len(options) - 1, nil
+		}
+	}
+}
+
+// clearMenu 清除选项渲染行，以便回显紧凑的一行决策结果
+func clearMenu(n int) {
+	fmt.Printf("\033[%dA", n)
+	for i := 0; i < n; i++ {
+		fmt.Print("\r\033[K\n")
+	}
+	fmt.Printf("\033[%dA", n)
+}
+
+// selectApprovalFallback 非 TTY 环境下的降级文本提示
+func selectApprovalFallback(options []string, defaultIdx int) (int, error) {
+	fmt.Print("   👉 请选择: [1] 允许本次 / [2] 会话始终允许 / [3] 拒绝 (默认 1): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return defaultIdx, err
+	}
+	ans := strings.ToLower(strings.TrimSpace(input))
+	switch ans {
+	case "1", "y", "yes", "":
+		return 0, nil
+	case "2", "a", "always":
+		return 1, nil
+	case "3", "n", "no", "q":
+		return len(options) - 1, nil
+	default:
+		return defaultIdx, nil
 	}
 }

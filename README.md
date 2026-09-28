@@ -1,6 +1,6 @@
 # Go AI Agent Framework
 
-一个用 Go 语言编写的高性能、生产级 AI Agent 核心框架。具备类似 **Claude Code / AGY** 的终端交互体验，支持原生的 **Function Calling** 与经典 **ReAct（Reasoning + Acting）** 自愈模式、**多智能体分治协同（Subagent 委派 + Supervisor 团队流水线）**、企业级 **双路混合 RAG（基于自研 go-es 驱动）**、**本地代码库自主阅读与终端工具（内置 Human-in-the-Loop 安全拦截）**、多模型统一抽象与路由容灾、DAG 任务规划并行调度，以及 Model Context Protocol (MCP) 与 Agent Skills 扩展协议。
+一个用 Go 语言编写的高性能、生产级 AI Agent 核心框架。具备类似 **Claude Code / AGY** 的终端交互体验，支持原生的 **Function Calling** 与经典 **ReAct（Reasoning + Acting）** 自愈模式、**多智能体分治协同（Subagent 委派 + Supervisor 团队流水线）**、**工业级上下文工程治理（Token 预算门控 + 历史滑动压缩 Compact + 大文本落盘外置与按需读回）**、企业级 **双路混合 RAG（基于自研 go-es 驱动）**、**本地代码库自主阅读与终端工具（内置 Human-in-the-Loop 安全拦截）**、多模型统一抽象与路由容灾、DAG 任务规划并行调度，以及 Model Context Protocol (MCP) 与 Agent Skills 扩展协议。
 
 ---
 
@@ -49,6 +49,13 @@
 ### 6. DAG 任务规划与拓扑并行执行 (`plan/`)
 - 基于 Kahn 算法进行依赖图拓扑分层（`Levels`），严格检测循环依赖。
 - 同层任务并发调度，层间依赖同步等待；支持单点故障快速熔断取消（`context.WithCancel`）。
+
+### 7. 上下文工程与 Token 治理 (`ctxeng/`)
+- **预算门控与细粒度估算 (`Budget` + `EstimateTokens`)**：在进入模型前动态计算上下文各部分 Token 占用，严格守护单轮预算门限。
+- **历史状态滑动压缩 (`Compact`)**：当对话历史超出设定预算时，自动触发滑动窗口压缩，提炼早期冗余历史为摘要并保留最新关键轮次。
+- **大文本外置与按需读回 (`FileMemory.Offload` + `read_memory`)**：工具返回大段技术文档/日志时自动落地存储，上下文中仅保留精炼摘要与引用 ID，避免撑爆主会话，模型需深挖事实时按需通过 `read_memory` 读回。
+- **意图驱动动态工具剪枝 (`SelectTools`)**：依据当前用户意图与 Prompt 语义关键词匹配，仅将最相关的 Top-N 工具注入请求，杜绝工具元数据占用过多 Token。
+- **无缝集成现有 Agent**：支持通过 `agent.WithContextBudget`、`agent.WithFileMemory`、`agent.WithToolSelection` 声明式配置，在 CLI 与 API 调用中自动生效。
 
 ---
 
@@ -103,7 +110,8 @@
 │   ├── main.go                  # 主程序循环、/team 团队模式、delegate_subagent 工具装配
 │   ├── editor.go                # 原生交互式终端行编辑器（实时下拉菜单、固定视口滚动、!shell）
 │   ├── editor_test.go           # 行编辑器单元测试（截断、无循环边界、消歧测试）
-│   └── config.go                # CLI 配置加载与环境变量映射
+│   ├── config.go                # CLI 配置加载与环境变量映射
+│   └── ctxeng_demo/main.go      # 上下文工程治理前后 Token 占用对比演示命令
 ├── agent/                       # [核心引擎] Agent 单体执行引擎与调度中心
 │   ├── agent.go                 # Agent 结构体定义、配置项与主调度循环 (Run / RunStream)
 │   ├── approver.go              # 人类在环 (HITL) 命令审计与交互式放行
@@ -112,7 +120,17 @@
 │   ├── function_call.go         # 原生 Function Calling 执行驱动
 │   ├── react.go                 # ReAct 自愈提示词与解析执行循环
 │   ├── state.go                 # 运行状态快照与上下文历史
-│   └── store.go                 # 会话持久化接口与 FileStore 实现
+│   ├── store.go                 # 会话持久化接口与 FileStore 实现
+│   └── agent_context_test.go    # 核心 Agent 集成上下文工程治理的连续多轮对比测试
+├── ctxeng/                      # [上下文工程] Token 预算门控、历史压缩、工具剪枝与外置存储
+│   ├── budget.go                # 上下文预算定义与超额检测 (Budget + EstimateTokens)
+│   ├── compact.go               # 滑动窗口压缩与历史摘要提炼 (Compact)
+│   ├── estimate.go              # 快速多语言 Token 粗估算法 (EstimateTokens)
+│   ├── file_memory.go           # 大段长文本本地外置与按需读回 (FileMemory + read_memory)
+│   ├── select_tool.go           # 基于意图的动态工具剪枝 (SelectTools)
+│   ├── assemble.go              # 组合装配与自适应压缩 (Assemble)
+│   ├── chart.go                 # 终端 ASCII 轮次-Token 增长曲线与对比表格渲染器
+│   └── ctxeng_test.go           # 核心治理算法的表驱动单元测试
 ├── mas/                         # [多智能体系统 MAS] 6 种经典多智能体协作范式
 │   ├── supervisor.go            # 主管-工作者 (Supervisor-Worker) 中心督导模式
 │   ├── orchestrator.go          # 分治编排与上下文物理隔离 (Isolated Orchestrator)
@@ -300,6 +318,91 @@ func main() {
 
 ---
 
+### 5. 上下文工程（Context Engineering）治理实战
+
+在长时间、跨模块的多轮交互中，工具返回的大段文本（如阅读长篇技术文档、代码库全量检索）会使上下文急速膨胀，导致费用暴增与注意力稀释。通过在 `agent.New` 中挂载治理选项，Agent 能够自主进行**预算门控、历史压缩、大文本外置与按需读回**：
+
+#### ① 为现有 Agent 启用上下文治理配置
+```go
+package main
+
+import (
+	"context"
+
+	"github.com/Kirby980/agent/agent"
+	"github.com/Kirby980/agent/ctxeng"
+)
+
+func main() {
+	// 创建开启上下文工程治理的 Agent
+	ag := agent.New(
+		provider,
+		"claude-3-5-sonnet",
+		registry,
+		// 1. 预算门控与滑动压缩：历史超过 300 Token 触发 Compact 提炼摘要，保留最新 2 轮
+		agent.WithContextBudget(ctxeng.Budget{History: 300}, 2, nil),
+		// 2. 长文本外置：工具产出超过 80 Token 自动存盘外置，并自动挂载 read_memory 供模型按需回读
+		agent.WithFileMemory("./store/mem", 80),
+		// 3. 动态工具裁剪：依据用户每轮输入意图，只注入最相关的 Top-2 工具定义
+		agent.WithToolSelection(2),
+	)
+
+	// 多轮交互下历史将保持严格有界，关键技术事实不会丢失
+	_, _ = ag.Run(context.Background(), "请阅读系统架构规范 arch_spec.md 并总结端口与存储组件")
+}
+```
+
+#### ② 治理前后多轮对比与增长曲线评测
+
+项目内置了开箱即用的对比评测工具与端到端集成测试，对比未治理（堆叠历史与长文）与治理后（预算门控 + Compact + 外置）的 Token 占用：
+
+```bash
+# 运行治理对比评测演示（输出彩色过程日志与 ASCII 曲线）
+go run ./cmd/ctxeng_demo/main.go
+
+# 或直接运行现有 Agent 的上下文治理多轮对比单测
+go test -v ./agent -run TestAgentContextEngineeringIntegration
+```
+
+终端将打印完整的治理对比数据表与高保真 ASCII 增长曲线：
+
+```text
+================================ 📊 上下文治理前后 Token 对比表 ================================
+轮次     | 未治理 Token    | 治理后 Token    | Token降幅  | 治理动作触发                           | 事实保留    
+-----------------------------------------------------------------------------------------------
+Round1  | 278          | 209          |   24.8%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+Round2  | 324          | 255          |   21.3%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+Round3  | 551          | 239          |   56.6%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+Round4  | 593          | 280          |   52.8%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+Round5  | 746          | 280          |   62.5%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+Round6  | 806          | 178          |   77.9%  | 内置上下文治理引擎生效中                     | ✅ 正确    
+===============================================================================================
+
+┌──────────────────────── 📈 轮次 — Token 占用增长曲线 (ASCII) ────────────────────────┐
+│ 图例说明: * 未治理(持续单调暴涨)   o 治理后(预算门控+Compact+外置，趋于有界)   @ 重叠 │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│  1000 ┤                                            │
+│   900 ┤                                            │
+│   800 ┤                                       *    │
+│   700 ┤                                *           │
+│   600 ┤                                            │
+│   500 ┤                  *      *                  │
+│   400 ┤                                            │
+│   300 ┤           *                                │
+│   200 ┤    @      o      o      o      o           │
+│   100 ┤                                       o    │
+│     0 ┤                                            │
+│       ┼───────────────────────────────────────────┤
+│ 轮次  :  R1    R2    R3    R4    R5    R6     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+💡 治理成效：
+• 曲线收敛有界：未治理曲线（*）随文档阅读与历史轮次单调暴增至 800+ Token；治理后曲线（o）在预算门限处被截断收敛，终态仅占用 178 Token（节约 77.9%）。
+• 任务质量保障：全流程核心技术指标（端口 9090、RocksDB、延迟 100ms、64 节点）100% 正确保留，杜绝以丢失事实为代价换取低 Token。
+```
+
+---
+
 ## 🧪 自动化测试与质量保障
 
 项目配有完整的单元测试套件：
@@ -307,6 +410,12 @@ func main() {
 ```bash
 # 运行全部单元测试
 go test -v ./...
+
+# 运行上下文工程核心表驱动测试 (EstimateTokens, Compact, SelectTools)
+go test -v ./ctxeng/...
+
+# 运行核心 Agent 集成上下文治理的多轮对比测试
+go test -v ./agent -run TestAgentContextEngineeringIntegration
 
 # 运行竞态并发安全检测
 go test -v -race ./...

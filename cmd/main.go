@@ -17,6 +17,7 @@ import (
 
 	"github.com/Kirby980/agent/agent"
 	"github.com/Kirby980/agent/builtin"
+	"github.com/Kirby980/agent/ctxeng"
 	"github.com/Kirby980/agent/llm"
 	"github.com/Kirby980/agent/mas"
 	"github.com/Kirby980/agent/mcp"
@@ -105,12 +106,13 @@ func runInteractiveCLI(ctx context.Context, cfg Config, configPath string) error
 	// 5. 构造 System Prompt
 	systemPrompt := "你是一个具备代码探索、重构编辑与终端执行能力的专业 AI 编程助手。当前工作目录是本项目的根目录。\n" +
 		"你可以通过 `bash`、`list_dir`、`read_file`、`write_file`、`replace_content` 探索并修改代码。\n" +
-		"当你面对复杂、繁重或多步骤任务时（如大范围代码调研、重构整个模块、编写多文件测试），强烈建议调用 `delegate_subagent` 工具派发给专门的子智能体（如 researcher 负责调研、coder 负责实现、reviewer 负责审查）。子智能体拥有隔离的上下文，能避免你的主上下文被海量中间检索输出污染。"
+		"当你面对复杂、繁重或多步骤任务时（如大范围代码调研、重构整个模块、编写多文件测试），强烈建议调用 `delegate_subagent` 工具派发给专门的子智能体（如 researcher 负责调研、coder 负责实现、reviewer 负责审查）。子智能体拥有隔离的上下文，能避免你的主上下文被海量中间检索输出污染。\n" +
+		"【长文本外置机制】：若遇极端超长终端输出或大文档返回 `[内容已外置 id=mem-xxx...]`，代表已由系统安全落盘。请切勿重复调用相同的工具读取相同路径！若需深入查阅全文细节，请调用 `read_memory` 传入该 id 读回。"
 	if skillPrompt := skill.FormatSkillsPrompt(skills); skillPrompt != "" {
 		systemPrompt += "\n\n" + skillPrompt
 	}
 
-	// 创建 Agent 实例的闭包辅助函数
+	// 创建 Agent 实例的闭包辅助函数（对标 Claude Code / AGY 工业级 60k 上下文预算）
 	createAgentInstance := func(sessionID, model string) *agent.Agent {
 		return agent.New(
 			clusterProvider,
@@ -119,6 +121,8 @@ func runInteractiveCLI(ctx context.Context, cfg Config, configPath string) error
 			agent.WithStore(agent.NewFileStore(storeDir), sessionID),
 			agent.WithSystemPrompt(systemPrompt),
 			agent.WithApprover(approver),
+			agent.WithContextBudget(ctxeng.Budget{History: 60000}, 8, nil),
+			agent.WithFileMemory(filepath.Join(storeDir, "mem"), 8000),
 		)
 	}
 
@@ -202,8 +206,9 @@ func runInteractiveCLI(ctx context.Context, cfg Config, configPath string) error
 					}
 					currentSession = newSess
 					currentAgent = createAgentInstance(currentSession, currentModel)
+					sessionAccumulator = &llm.Accumulator{}
 					ed.SetPrompt(fmt.Sprintf("\033[36magent\033[0m (\033[33m%s\033[0m) > ", currentSession))
-					fmt.Printf("✓ 已开启全新会话: \033[33m%s\033[0m (上下文已重置)\n\n", currentSession)
+					fmt.Printf("✓ 已开启全新会话: \033[33m%s\033[0m (上下文与 Token 统计已重置)\n\n", currentSession)
 					continue
 
 				case "/resume":
@@ -364,6 +369,8 @@ func runSingleTurn(ctx context.Context, cfg Config, prompt string) error {
 		mainRegistry,
 		agent.WithSystemPrompt(systemPrompt),
 		agent.WithApprover(approver),
+		agent.WithContextBudget(ctxeng.Budget{History: 60000}, 8, nil),
+		agent.WithFileMemory("./store/mem", 8000),
 	)
 
 	runAgentTurn(ctx, ag, prompt, nil)
@@ -400,18 +407,34 @@ func runAgentTurn(ctx context.Context, a *agent.Agent, input string, sessionAcc 
 			if ev.Usage != nil {
 				stepUsage = ev.Usage
 			}
+			totalUsage := ev.TotalUsage
+			if totalUsage == nil && stepUsage != nil {
+				totalUsage = stepUsage
+			}
 			fmt.Println()
 			if stepUsage != nil {
 				if sessionAcc != nil {
 					sessionAcc.Add(*stepUsage, llm.Pricing{})
 				}
-				fmt.Printf("\033[90m📊 [Token 统计] 输入: %d | 缓存命中: %d (命中率 %.1f%%) | 输出: %d | 累计总计: %d\033[0m\n\n",
+				fmt.Printf("\033[90m📊 [Token 统计]\033[0m\n")
+				fmt.Printf("\033[90m   • 本轮对话: 输入 %d | 缓存命中 %d (%.1f%%) | 输出 %d | 本轮合计: %d\033[0m\n",
 					stepUsage.InputTokens,
 					stepUsage.CachedTokens,
 					stepUsage.CacheHitRate(),
 					stepUsage.OutputTokens,
 					stepUsage.Total(),
 				)
+				if totalUsage != nil {
+					fmt.Printf("\033[90m   • 会话累计: 输入 %d | 缓存命中 %d (%.1f%%) | 输出 %d | 累计总计: %d\033[0m\n\n",
+						totalUsage.InputTokens,
+						totalUsage.CachedTokens,
+						totalUsage.CacheHitRate(),
+						totalUsage.OutputTokens,
+						totalUsage.Total(),
+					)
+				} else {
+					fmt.Println()
+				}
 			}
 		}
 	}

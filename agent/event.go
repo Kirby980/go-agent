@@ -28,6 +28,7 @@ type AgentEvent struct {
 	Text  string     `json:"text,omitempty"`  // 思考内容 / 答案增量 / 错误信息
 	Tool  string     `json:"tool,omitempty"`  // 涉及的工具名
 	Args  string     `json:"args,omitempty"`  // 工具参数
-	Step  int        `json:"step,omitempty"`  // 当前 Agent 步数
-	Usage *llm.Usage `json:"usage,omitempty"` // 本轮或累计 Token 消耗及缓存命中详情
+	Step       int        `json:"step,omitempty"`        // 当前 Agent 步数
+	Usage      *llm.Usage `json:"usage,omitempty"`       // 本步或本轮单次 Token 消耗及缓存命中详情
+	TotalUsage *llm.Usage `json:"total_usage,omitempty"` // 会话累计 Token 消耗及缓存命中详情
 }

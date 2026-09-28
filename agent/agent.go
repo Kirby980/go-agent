@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Kirby980/agent/ctxeng"
 	"github.com/Kirby980/agent/llm"
 	"github.com/Kirby980/agent/tool"
 )
@@ -28,6 +29,14 @@ type Agent struct {
 	sessionID    string         // 会话 ID，配合 store 使用
 	memory       *State         // 进程内缓存的最新会话状态
 	approver     Approver       // 权限与安全审批器（可选）
+
+	// 上下文工程（Context Engineering）治理配置
+	ctxBudget        *ctxeng.Budget
+	keepRecent       int
+	summarize        func(ctx context.Context, older []llm.Message) (string, error)
+	fileMemory       *ctxeng.FileMemory
+	offloadThreshold int
+	maxSelectTools   int
 }
 
 // New 创建并初始化一个 Agent 实例。
@@ -82,6 +91,94 @@ func WithMemory(memory *State) Option {
 func WithApprover(approver Approver) Option {
 	return func(agent *Agent) {
 		agent.approver = approver
+	}
+}
+
+// WithContextBudget 设置上下文预算门控及压缩策略。
+func WithContextBudget(budget ctxeng.Budget, keepRecent int, summarize func(ctx context.Context, older []llm.Message) (string, error)) Option {
+	return func(agent *Agent) {
+		agent.ctxBudget = &budget
+		if keepRecent <= 0 {
+			keepRecent = 2
+		}
+		agent.keepRecent = keepRecent
+		if summarize == nil {
+			// 默认提供结构化保留实现：提取历史中所有用户目标和关键结论，防止模型失忆
+			summarize = func(ctx context.Context, older []llm.Message) (string, error) {
+				var userGoals []string
+				var assistantConclusions []string
+				for _, m := range older {
+					content := strings.TrimSpace(m.Content)
+					if content == "" {
+						continue
+					}
+					runes := []rune(content)
+					if len(runes) > 120 {
+						content = string(runes[:120]) + "…"
+					}
+					if m.Role == llm.RoleUser {
+						userGoals = append(userGoals, "• 用户意图: "+content)
+					} else if m.Role == llm.RoleAssistant && len(m.ToolCalls) == 0 {
+						assistantConclusions = append(assistantConclusions, "• 阶段进展: "+content)
+					}
+				}
+				var sb strings.Builder
+				sb.WriteString("【早前多轮对话核心脉络】\n")
+				if len(userGoals) > 0 {
+					start := 0
+					if len(userGoals) > 3 {
+						start = len(userGoals) - 3
+					}
+					for _, g := range userGoals[start:] {
+						sb.WriteString(g + "\n")
+					}
+				}
+				if len(assistantConclusions) > 0 {
+					start := 0
+					if len(assistantConclusions) > 3 {
+						start = len(assistantConclusions) - 3
+					}
+					for _, c := range assistantConclusions[start:] {
+						sb.WriteString(c + "\n")
+					}
+				}
+				if sb.Len() == len("【早前多轮对话核心脉络】\n") {
+					text := ctxeng.JoinContent(older)
+					runes := []rune(text)
+					if len(runes) > 200 {
+						return string(runes[:200]) + "……", nil
+					}
+					return text, nil
+				}
+				return sb.String(), nil
+			}
+		}
+		agent.summarize = summarize
+	}
+}
+
+// WithFileMemory 启用大段文本输出外置存储，并自动注册 read_memory 工具。
+func WithFileMemory(dir string, threshold int) Option {
+	return func(agent *Agent) {
+		if dir == "" {
+			dir = "./store/mem"
+		}
+		if threshold <= 0 {
+			threshold = 100
+		}
+		agent.fileMemory = &ctxeng.FileMemory{Dir: dir}
+		agent.offloadThreshold = threshold
+		if agent.tools == nil {
+			agent.tools = tool.NewRegistry()
+		}
+		agent.tools.Register(ctxeng.ReadMemory(dir))
+	}
+}
+
+// WithToolSelection 开启每轮调用前基于用户输入动态裁剪工具，只向模型暴露相关度最高的 maxTools 个工具。
+func WithToolSelection(maxTools int) Option {
+	return func(agent *Agent) {
+		agent.maxSelectTools = maxTools
 	}
 }
 
@@ -210,9 +307,7 @@ func (agent *Agent) initialState(ctx context.Context, goal string) (*State, erro
 	} else {
 		state.Goal = goal
 		state.Phase = PhaseThinking
-		if state.ActionCounts == nil {
-			state.ActionCounts = make(map[string]int)
-		}
+		state.ActionCounts = make(map[string]int) // 每次开启新一轮用户交互，重置单轮死循环检测计数器
 		state.UpdatedAt = now
 		sysPrompt := agent.buildSystemPrompt()
 		if len(state.Messages) == 0 {
@@ -233,6 +328,18 @@ func (agent *Agent) initialState(ctx context.Context, goal string) (*State, erro
 			Content: goal,
 		})
 	}
+
+	// 上下文预算门控治理：若历史消息超出 Budget.History，自动触发 Compact 压缩
+	if agent.ctxBudget != nil && agent.ctxBudget.History > 0 {
+		historyText := ctxeng.JoinContent(state.Messages)
+		if agent.ctxBudget.IsHistoryOver(historyText) {
+			compacted, err := ctxeng.Compact(ctx, state.Messages, agent.keepRecent, agent.summarize)
+			if err == nil && len(compacted) < len(state.Messages) {
+				state.Messages = compacted
+			}
+		}
+	}
+
 	agent.memory = state
 	return state, nil
 }
@@ -293,4 +400,27 @@ func (agent *Agent) Run(ctx context.Context, goal string) (string, error) {
 		return "", runErr
 	}
 	return answer, nil
+}
+
+// Memory 返回当前 Agent 内存中保存的会话状态快照。
+func (agent *Agent) Memory() *State {
+	return agent.memory
+}
+
+// Messages 返回当前会话消息历史的一个快照副本。
+func (agent *Agent) Messages() []llm.Message {
+	if agent.memory == nil {
+		return nil
+	}
+	msgs := make([]llm.Message, len(agent.memory.Messages))
+	copy(msgs, agent.memory.Messages)
+	return msgs
+}
+
+// EstimateContextTokens 估算当前对话历史中所有消息的 Token 总量。
+func (agent *Agent) EstimateContextTokens() int {
+	if agent.memory == nil {
+		return 0
+	}
+	return ctxeng.EstimateTokens(ctxeng.JoinContent(agent.memory.Messages))
 }
