@@ -14,6 +14,7 @@ type mockProvider struct {
 	resp string
 }
 
+// test
 func (m *mockProvider) Name() string                 { return m.name }
 func (m *mockProvider) Capabilities() llm.Capability { return llm.Capability{} }
 func (m *mockProvider) Chat(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
@@ -113,4 +114,3 @@ func TestRouter_AsProvider(t *testing.T) {
 		t.Fatalf("AsProvider.Chat failed: resp=%v, err=%v", resp, err)
 	}
 }
-

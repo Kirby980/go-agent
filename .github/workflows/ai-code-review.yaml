@@ -2,7 +2,8 @@ name: AI Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
+    branches: [ main, master ]
 
 jobs:
   review:
@@ -10,6 +11,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      issues: write
 
     steps:
       - name: Checkout Code
@@ -19,7 +21,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 提取当前 PR 代码改动
+          echo "正在提取 PR #${{ github.event.pull_request.number }} 的代码改动..."
           gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt
 
           if [ ! -s pr_diff.txt ]; then
@@ -33,12 +35,26 @@ jobs:
       - name: Call AI for Review
         if: hashFiles('pr_diff_trimmed.txt') != ''
         env:
+          # 同时兼容从 Secrets 或 Variables 读取
           API_KEY: ${{ secrets.AI_API_KEY }}
-          BASE_URL: ${{ secrets.AI_BASE_URL }}
-          MODEL: ${{ secrets.AI_MODEL }}
+          RAW_BASE_URL: ${{ secrets.AI_BASE_URL || vars.AI_BASE_URL }}
+          RAW_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
         run: |
-          # 去除 Base URL 末尾可能多带的斜杠
+          # 1. 检查 API_KEY 是否已配置
+          if [ -z "$API_KEY" ]; then
+            echo "::error::【配置缺失】未检测到 AI_API_KEY！请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中添加名为 AI_API_KEY 的 Secret。"
+            exit 1
+          fi
+
+          # 2. 如果未配置 BASE_URL，默认使用 DeepSeek 官方地址，防止 URL 为空导致 curl exit code 3
+          BASE_URL="${RAW_BASE_URL:-https://api.deepseek.com/v1}"
+          MODEL="${RAW_MODEL:-deepseek-chat}"
+
+          # 去除末尾斜杠
           CLEAN_BASE_URL="${BASE_URL%/}"
+
+          echo "请求地址: ${CLEAN_BASE_URL}/chat/completions"
+          echo "审查模型: ${MODEL}"
 
           PROMPT="你是一位严谨的资深架构师和代码审查员。请对提交的代码变更 (git diff) 进行代码审查。
           请重点关注：
@@ -63,27 +79,35 @@ jobs:
             }')
 
           # 发起调用
-          RESPONSE=$(curl -s -X POST "${CLEAN_BASE_URL}/chat/completions" \
+          RESPONSE=$(curl -s -S -X POST "${CLEAN_BASE_URL}/chat/completions" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $API_KEY" \
             -d "$PAYLOAD")
 
-          # 提取返回内容
+          # 提取审查回复
           echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' > review_result.md
 
+          # 若未提取到内容，输出具体错误信息
           if [ ! -s review_result.md ]; then
-            echo "❌ 调用大模型失败或无有效回复，API 响应：" > review_result.md
+            echo "❌ 调用大模型未返回有效文本，API 返回内容如下：" > review_result.md
             echo "\`\`\`json" >> review_result.md
             echo "$RESPONSE" >> review_result.md
             echo "\`\`\`" >> review_result.md
           fi
 
-      - name: Comment Review on PR
+      - name: Output & Comment Review Result
         if: hashFiles('review_result.md') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODEL: ${{ secrets.AI_MODEL }}
+          RAW_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
         run: |
+          MODEL="${RAW_MODEL:-deepseek-chat}"
           HEADER="### 🤖 AI 代码审查报告 (模型: \`${MODEL}\`)"
           BODY=$(cat review_result.md)
-          gh pr comment ${{ github.event.pull_request.number }} --body "$HEADER"$'\n\n'"$BODY"
+          REPORT="${HEADER}"$'\n\n'"${BODY}"
+
+          # 1. 输出到 GitHub Actions 的 Summary 页面
+          echo "$REPORT" >> $GITHUB_STEP_SUMMARY
+
+          # 2. 发表评论到 Pull Request 页面下方
+          gh pr comment ${{ github.event.pull_request.number }} --body "$REPORT"
