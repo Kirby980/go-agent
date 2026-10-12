@@ -3,8 +3,8 @@
 
 # 大语言模型配置
 model:               # 默认使用的模型名称 (如 gemini-2.5-pro, gemini-2.5-flash)
-base_url:   # API 基础地址 (本地 LiteLLM 网关或远程 OpenAI 兼容端点)
-api_key:        # API 访问密钥
+base_url:            # API 基础地址 (本地 LiteLLM 网关或远程 OpenAI 兼容端点)
+api_key:             # API 访问密钥
 supplier: "openai"                     # 供应商协议类型: openai 或 claude
 name: "vertex-gateway"                 # Provider 展示名称
 
