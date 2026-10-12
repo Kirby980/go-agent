@@ -35,26 +35,32 @@ jobs:
       - name: Call AI for Review
         if: hashFiles('pr_diff_trimmed.txt') != ''
         env:
-          # 同时兼容从 Secrets 或 Variables 读取
+          # 严格从你的 GitHub Secrets 或 Variables 中读取配置
           API_KEY: ${{ secrets.AI_API_KEY }}
-          RAW_BASE_URL: ${{ secrets.AI_BASE_URL || vars.AI_BASE_URL }}
-          RAW_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
+          BASE_URL: ${{ secrets.AI_BASE_URL || vars.AI_BASE_URL }}
+          MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
         run: |
-          # 1. 检查 API_KEY 是否已配置
+          # 严格校验：无任何默认兜底，缺少任意一项直接报错提示
           if [ -z "$API_KEY" ]; then
             echo "::error::【配置缺失】未检测到 AI_API_KEY！请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中添加名为 AI_API_KEY 的 Secret。"
             exit 1
           fi
 
-          # 2. 如果未配置 BASE_URL，默认使用 DeepSeek 官方地址，防止 URL 为空导致 curl exit code 3
-          BASE_URL="${RAW_BASE_URL:-https://api.deepseek.com/v1}"
-          MODEL="${RAW_MODEL:-deepseek-chat}"
+          if [ -z "$BASE_URL" ]; then
+            echo "::error::【配置缺失】未检测到 AI_BASE_URL！请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中添加 AI_BASE_URL（请检查是否在 Secrets 或 Variables 中配置）。"
+            exit 1
+          fi
+
+          if [ -z "$MODEL" ]; then
+            echo "::error::【配置缺失】未检测到 AI_MODEL！请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中添加 AI_MODEL（请检查是否在 Secrets 或 Variables 中配置）。"
+            exit 1
+          fi
 
           # 去除末尾斜杠
           CLEAN_BASE_URL="${BASE_URL%/}"
 
-          echo "请求地址: ${CLEAN_BASE_URL}/chat/completions"
-          echo "审查模型: ${MODEL}"
+          echo "正在使用自定义网关: ${CLEAN_BASE_URL}/chat/completions"
+          echo "正在使用自定义模型: ${MODEL}"
 
           PROMPT="你是一位严谨的资深架构师和代码审查员。请对提交的代码变更 (git diff) 进行代码审查。
           请重点关注：
@@ -99,9 +105,8 @@ jobs:
         if: hashFiles('review_result.md') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RAW_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
+          MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL }}
         run: |
-          MODEL="${RAW_MODEL:-deepseek-chat}"
           HEADER="### 🤖 AI 代码审查报告 (模型: \`${MODEL}\`)"
           BODY=$(cat review_result.md)
           REPORT="${HEADER}"$'\n\n'"${BODY}"
