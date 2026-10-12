@@ -1,0 +1,89 @@
+    name: AI Code Review
+    
+    on:
+      pull_request:
+        types: [opened, synchronize]
+    
+    jobs:
+      review:
+        runs-on: ubuntu-latest
+        permissions:
+          contents: read
+          pull-requests: write
+    
+        steps:
+          - name: Checkout Code
+            uses: actions/checkout@v4
+    
+          - name: Fetch PR Diff
+            env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: |
+              # 提取当前 PR 代码改动
+              gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt
+    
+              if [ ! -s pr_diff.txt ]; then
+                echo "无代码变更，跳过审查。"
+                exit 0
+              fi
+    
+              # 截取前 30KB 避免超出 Token 限制
+              head -c 30000 pr_diff.txt > pr_diff_trimmed.txt
+    
+          - name: Call AI for Review
+            if: hashFiles('pr_diff_trimmed.txt') != ''
+            env:
+              API_KEY: ${{ secrets.AI_API_KEY }}
+              BASE_URL: ${{ secrets.AI_BASE_URL }}
+              MODEL: ${{ secrets.AI_MODEL }}
+            run: |
+              # 去除 Base URL 末尾可能多带的斜杠
+              CLEAN_BASE_URL="${BASE_URL%/}"
+    
+              PROMPT="你是一位严谨的资深架构师和代码审查员。请对提交的代码变更 (git diff) 进行代码审查。
+              请重点关注：
+              1. 潜在 Bug、边界情况、并发安全与空指针/异常处理；
+              2. 性能问题与资源释放；
+              3. 代码规范与架构设计建议。
+              请给出清晰的 Markdown 格式审查结论和修改建议，使用中文回复。"
+    
+              DIFF_CONTENT=$(jq -s -R . < pr_diff_trimmed.txt)
+    
+              PAYLOAD=$(jq -n \
+                --arg model "$MODEL" \
+                --arg prompt "$PROMPT" \
+                --arg diff "$DIFF_CONTENT" \
+                '{
+                  model: $model,
+                  messages: [
+                    {role: "system", content: $prompt},
+                    {role: "user", content: ("代码差异如下:\n" + $diff)}
+                  ],
+                  temperature: 0.2
+                }')
+    
+              # 发起调用
+              RESPONSE=$(curl -s -X POST "${CLEAN_BASE_URL}/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $API_KEY" \
+                -d "$PAYLOAD")
+    
+              # 提取返回内容
+              echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' > review_result.md
+    
+              if [ ! -s review_result.md ]; then
+                echo "❌ 调用大模型失败或无有效回复，API 响应：" > review_result.md
+                echo "\`\`\`json" >> review_result.md
+                echo "$RESPONSE" >> review_result.md
+                echo "\`\`\`" >> review_result.md
+              fi
+
+          - name: Comment Review on PR
+            if: hashFiles('review_result.md') != ''
+            env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              MODEL: ${{ secrets.AI_MODEL }}
+            run: |
+              HEADER="### 🤖 AI 代码审查报告 (模型: \`${MODEL}\`)"
+              BODY=$(cat review_result.md)
+              gh pr comment ${{ github.event.pull_request.number }} --body "$HEADER"$'\n\n'"$BODY"
